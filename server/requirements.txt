@@ -3,11 +3,10 @@ uvicorn[standard]==0.27.0
 python-dotenv==1.0.0
 pyjwt==2.8.0
 bcrypt==4.1.2
-httpx==0.26.0
+httpx>=0.28.1
 requests==2.31.0
 python-multipart==0.0.6
 email-validator==2.1.0
-groq==0.11.0
 pydub==0.25.1
 audioop-lts
 google-genai>=1.56.0

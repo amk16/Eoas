@@ -16,7 +16,6 @@ cp .env.example .env
 
 3. Update `.env` with your API keys:
 - `JWT_SECRET`: A random secret string for JWT token signing
-- `GROQ_API_KEY`: Your Groq Cloud API key (needed for Phase 6)
 - `GEMINI_API_KEY`: Your Google Gemini API key (needed for Phase 7)
 
 ## Running
@@ -57,7 +56,7 @@ The server will run on `http://localhost:3001` by default.
 - `POST /api/sessions/:id/characters` - Add characters to session
 
 ### Phase 6
-- `POST /api/transcribe` - Transcribe audio using Groq Cloud
+- `POST /api/transcribe` - Transcribe audio using ElevenLabs Scribe
 
 ### Phase 7
 - `POST /api/analyze` - Analyze transcript for damage/healing events

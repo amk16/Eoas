@@ -11,7 +11,6 @@ pip install -r requirements.txt
 
 2. Ensure you have a `.env` file with the required environment variables:
 - `JWT_SECRET`: A random secret string for JWT token signing
-- `GROQ_API_KEY`: Your Groq Cloud API key (needed for audio transcription)
 - `ELEVENLABS_API_KEY`: Your ElevenLabs API key (needed for realtime scribe transcription)
 - `PORT`: Server port (default: 3001)
 - `DATABASE_PATH`: Optional path to SQLite database (default: `data/dnd_tracker.db`)
@@ -67,7 +66,7 @@ All endpoints match the original Node.js server:
 - `GET /api/sessions/:id/events` - Get session events
 
 ### Audio
-- `POST /api/audio/transcribe` - Transcribe audio using Groq Cloud
+- `POST /api/audio/transcribe` - Transcribe audio using ElevenLabs Scribe
 
 ### ElevenLabs Scribe
 - `GET /api/scribe-token` - Generate single-use token for ElevenLabs Realtime Scribe streaming

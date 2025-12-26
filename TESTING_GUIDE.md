@@ -26,7 +26,7 @@ JWT_SECRET=your-random-secret-key-here-change-this
 DATABASE_PATH=./data/dnd_tracker.db
 ```
 
-**Note**: For Phases 1-3, you don't need `GROQ_API_KEY` or `GEMINI_API_KEY` yet (those are for later phases).
+**Note**: For Phases 1-3, you don't need `GEMINI_API_KEY` yet (that's for later phases).
 
 Start the backend server:
 ```bash
@@ -119,7 +119,7 @@ The frontend should open at `http://localhost:5173` (or similar port).
 Once you've verified Phases 1-3 work correctly, we can proceed to:
 - **Phase 4**: Session Management
 - **Phase 5**: Audio Capture (Frontend)
-- **Phase 6**: Groq Cloud Transcription
+- **Phase 6**: ElevenLabs Scribe Transcription
 - And so on...
 
 Let me know if you encounter any issues during testing!

@@ -335,7 +335,7 @@ class ScribeError(RuntimeError):
 
 async def transcribe_audio(audio_buffer: bytes, filename: str = "audio.webm", content_type: str = "", language_code: Optional[str] = None) -> Dict[str, Any]:
     """
-    High-level function to replace your Groq transcribe_audio:
+    High-level function for audio transcription:
     - Accepts raw audio bytes (uploaded file content).
     - Decodes/resamples to 16kHz mono PCM.
     - Streams to ElevenLabs Realtime WebSocket.
@@ -412,7 +412,7 @@ async def transcribe_audio(audio_buffer: bytes, filename: str = "audio.webm", co
             if not final_event:
                 raise ScribeError("No committed_transcript received from Scribe.")
 
-            # Build a convenient response similar to the Groq/Whisper wrapper:
+            # Build a convenient response:
             text = final_event.get("text") or final_event.get("transcript") or ""
             return {"text": text, "raw": final_event}
 
