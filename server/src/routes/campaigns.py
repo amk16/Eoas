@@ -1,8 +1,12 @@
 from fastapi import APIRouter, HTTPException, Depends
+from starlette.requests import Request
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+import logging
 from ..middleware.auth import authenticate_token
 from ..db.database import get_database
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -19,9 +23,16 @@ class CampaignUpdate(BaseModel):
 
 
 @router.get('/')
-async def get_campaigns(user_id: int = Depends(authenticate_token)) -> List[Dict[str, Any]]:
+async def get_campaigns(request: Request, user_id: int = Depends(authenticate_token)) -> List[Dict[str, Any]]:
     """Get all campaigns for the authenticated user."""
     try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        forwarded_for = request.headers.get('X-Forwarded-For', 'not-set')
+        host = request.headers.get('Host', 'not-set')
+        logger.info(f'[Campaigns API] GET /campaigns - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}, X-Forwarded-For={forwarded_for}, Host={host}')
+        
         db = get_database()
         rows = db.execute(
             'SELECT * FROM campaigns WHERE user_id = ? ORDER BY created_at DESC',
@@ -29,6 +40,9 @@ async def get_campaigns(user_id: int = Depends(authenticate_token)) -> List[Dict
         ).fetchall()
         
         campaigns = [dict(row) for row in rows]
+        
+        # Log response being sent
+        logger.info(f'[Campaigns API] GET /campaigns - Sending response with {len(campaigns)} campaign(s), protocol={scheme}, forwarded_proto={forwarded_proto}')
         return campaigns
     except Exception as e:
         print(f'Error fetching campaigns: {e}')
@@ -36,9 +50,14 @@ async def get_campaigns(user_id: int = Depends(authenticate_token)) -> List[Dict
 
 
 @router.get('/{campaign_id}')
-async def get_campaign(campaign_id: int, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
+async def get_campaign(campaign_id: int, request: Request, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
     """Get a single campaign by ID with characters and sessions."""
     try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        logger.info(f'[Campaigns API] GET /campaigns/{campaign_id} - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}')
+        
         db = get_database()
         
         # Get campaign
@@ -68,11 +87,15 @@ async def get_campaign(campaign_id: int, user_id: int = Depends(authenticate_tok
         
         sessions = [dict(row) for row in sessions_rows]
         
-        return {
+        result = {
             **campaign,
             'characters': characters,
             'sessions': sessions
         }
+        
+        # Log response being sent
+        logger.info(f'[Campaigns API] GET /campaigns/{campaign_id} - Sending response, protocol={scheme}, forwarded_proto={forwarded_proto}')
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -81,9 +104,14 @@ async def get_campaign(campaign_id: int, user_id: int = Depends(authenticate_tok
 
 
 @router.post('/')
-async def create_campaign(campaign: CampaignCreate, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
+async def create_campaign(campaign: CampaignCreate, request: Request, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
     """Create a new campaign."""
     try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        logger.info(f'[Campaigns API] POST /campaigns - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}')
+        
         if not campaign.name:
             raise HTTPException(status_code=400, detail='Campaign name is required')
         
@@ -96,7 +124,11 @@ async def create_campaign(campaign: CampaignCreate, user_id: int = Depends(authe
         campaign_id = cursor.lastrowid
         
         row = db.execute('SELECT * FROM campaigns WHERE id = ?', (campaign_id,)).fetchone()
-        return dict(row)
+        result = dict(row)
+        
+        # Log response being sent
+        logger.info(f'[Campaigns API] POST /campaigns - Sending response with campaign_id={campaign_id}, protocol={scheme}, forwarded_proto={forwarded_proto}')
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -108,10 +140,16 @@ async def create_campaign(campaign: CampaignCreate, user_id: int = Depends(authe
 async def update_campaign(
     campaign_id: int,
     campaign_update: CampaignUpdate,
+    request: Request,
     user_id: int = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Update a campaign."""
     try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        logger.info(f'[Campaigns API] PUT /campaigns/{campaign_id} - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}')
+        
         db = get_database()
         
         # Verify campaign belongs to user
@@ -145,7 +183,11 @@ async def update_campaign(
         db.commit()
         
         row = db.execute('SELECT * FROM campaigns WHERE id = ?', (campaign_id,)).fetchone()
-        return dict(row)
+        result = dict(row)
+        
+        # Log response being sent
+        logger.info(f'[Campaigns API] PUT /campaigns/{campaign_id} - Sending response, protocol={scheme}, forwarded_proto={forwarded_proto}')
+        return result
     except HTTPException:
         raise
     except Exception as e:
@@ -154,9 +196,14 @@ async def update_campaign(
 
 
 @router.delete('/{campaign_id}')
-async def delete_campaign(campaign_id: int, user_id: int = Depends(authenticate_token)) -> Dict[str, str]:
+async def delete_campaign(campaign_id: int, request: Request, user_id: int = Depends(authenticate_token)) -> Dict[str, str]:
     """Delete a campaign."""
     try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        logger.info(f'[Campaigns API] DELETE /campaigns/{campaign_id} - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}')
+        
         db = get_database()
         
         # Verify campaign belongs to user
@@ -171,7 +218,11 @@ async def delete_campaign(campaign_id: int, user_id: int = Depends(authenticate_
         db.execute('DELETE FROM campaigns WHERE id = ? AND user_id = ?', (campaign_id, user_id))
         db.commit()
         
-        return {'message': 'Campaign deleted successfully'}
+        result = {'message': 'Campaign deleted successfully'}
+        
+        # Log response being sent
+        logger.info(f'[Campaigns API] DELETE /campaigns/{campaign_id} - Sending response, protocol={scheme}, forwarded_proto={forwarded_proto}')
+        return result
     except HTTPException:
         raise
     except Exception as e:
