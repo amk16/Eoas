@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Node.js (not needed for Python server)
+node_modules/
+package-lock.json
+package.json
+tsconfig.json
+
+# Database files (will be created at runtime or use Cloud SQL)
+*.db
+*.db-shm
+*.db-wal
+
+# Uploads (should use Cloud Storage in production)
+uploads/
+temp/
+
+# Documentation
+*.md
+!README.md
+
+# Test files
+test_*.py
+*_test.py
+TESTING_*.md
+
+# Environment files (should be set in Cloud Run)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+
+# Misc
+.cache/
+__pycache__/
+
