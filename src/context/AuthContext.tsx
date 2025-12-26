@@ -41,7 +41,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('token', newToken);
       localStorage.setItem('user', JSON.stringify(newUser));
     } catch (error: any) {
-      throw new Error(error.response?.data?.error || 'Login failed');
+      // FastAPI returns errors in 'detail' field, not 'error'
+      const errorMessage = error.response?.data?.detail || error.response?.data?.error || error.message || 'Login failed';
+      throw new Error(errorMessage);
     }
   };
 
@@ -55,7 +57,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('token', newToken);
       localStorage.setItem('user', JSON.stringify(newUser));
     } catch (error: any) {
-      throw new Error(error.response?.data?.error || 'Registration failed');
+      // FastAPI returns errors in 'detail' field, not 'error'
+      const errorMessage = error.response?.data?.detail || error.response?.data?.error || error.message || 'Registration failed';
+      throw new Error(errorMessage);
     }
   };
 
