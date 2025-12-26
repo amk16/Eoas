@@ -24,4 +24,4 @@ echo ""
 # Start uvicorn
 PORT=${PORT:-8080}
 echo "Starting uvicorn on port $PORT..."
-exec python -m uvicorn src.main:app --host 0.0.0.0 --port "$PORT" --log-level info
+exec python -m uvicorn src.main:app --host 0.0.0.0 --port "$PORT" --log-level info --proxy-headers --forwarded-allow-ips="*" 
