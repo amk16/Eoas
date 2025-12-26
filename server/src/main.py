@@ -6,6 +6,10 @@ import os
 import sys
 import logging
 from pathlib import Path
+from starlette.middleware.proxy_headers import ProxyHeadersMiddleware
+from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
+
+
 
 # Add parent directory to path to allow imports
 server_dir = Path(__file__).parent.parent
@@ -52,6 +56,13 @@ if production_origin not in allowed_origins:
     allowed_origins.append(production_origin)
 
 logger.info(f"CORS allowed origins: {allowed_origins}")
+
+app.add_middleware(
+    ProxyHeadersMiddleware,
+    trusted_hosts="*"
+)
+
+app.add_middleware(HTTPSRedirectMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
