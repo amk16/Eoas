@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import type React from 'react';
 import type { Character } from '../../types';
 import Drawer from '../ui/Drawer';
 import { generateAndSaveCharacterArt } from '../../services/imageGenerationService';

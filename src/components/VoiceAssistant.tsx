@@ -337,8 +337,12 @@ export default function VoiceAssistant() {
           userId: user?.id?.toString() || undefined,
         });
       } else if (tokenData.agentId || tokenData.agent_id) {
+        const agentId = tokenData.agentId || tokenData.agent_id;
+        if (!agentId) {
+          throw new Error('Agent ID is required but was not provided');
+        }
         conversationId = await conversation.startSession({
-          agentId: tokenData.agentId || tokenData.agent_id,
+          agentId: agentId,
           connectionType: 'websocket', // Default to websocket
           userId: user?.id?.toString() || undefined,
         });
