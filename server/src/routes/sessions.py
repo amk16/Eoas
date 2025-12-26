@@ -1,0 +1,1646 @@
+from fastapi import APIRouter, HTTPException, Depends, Query
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
+from ..middleware.auth import authenticate_token
+from ..db.database import get_database
+from ..services.event_types import get_event_type_by_name, get_registered_events
+
+
+router = APIRouter()
+
+
+class SessionCreate(BaseModel):
+    name: str
+    campaign_id: Optional[int] = None
+
+
+class SessionUpdate(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None
+    ended_at: Optional[str] = None
+
+
+class AddCharactersRequest(BaseModel):
+    character_ids: List[int]
+
+
+# ============================================================================
+# BACKWARD COMPATIBILITY - DEPRECATED MODELS
+# These models are only used by deprecated endpoints above.
+# TODO: Remove when deprecated endpoints are removed
+# ============================================================================
+
+class DamageEventCreate(BaseModel):
+    """[DEPRECATED] Model for damage/healing events. Use EventCreate instead."""
+    character_id: int
+    amount: int
+    type: str  # 'damage' or 'healing'
+    transcript_segment: Optional[str] = None
+
+
+class TranscriptSegmentCreate(BaseModel):
+    client_chunk_id: str
+    client_timestamp_ms: Optional[int] = None
+    text: str
+    speaker: Optional[str] = None
+
+
+class TranscriptSegmentUpdate(BaseModel):
+    text: Optional[str] = None
+    speaker: Optional[str] = None
+
+
+# Phase 1: Combat event models
+class CombatEventCreate(BaseModel):
+    """[DEPRECATED] Model for combat events. Use EventCreate instead."""
+    event_type: str  # 'initiative_roll', 'turn_advance', 'round_start'
+    character_id: Optional[int] = None  # Required for initiative_roll
+    initiative_value: Optional[int] = None  # Required for initiative_roll
+    round_number: Optional[int] = None  # Optional for round_start
+    transcript_segment: Optional[str] = None
+
+
+class InitiativeAdvanceRequest(BaseModel):
+    pass  # No parameters needed, just advances to next turn
+
+
+class InitiativeReorderRequest(BaseModel):
+    character_orders: List[Dict[str, int]]  # [{"character_id": 1, "turn_order": 1}, ...]
+
+
+# Phase 2: Status condition models
+class StatusConditionRemoveRequest(BaseModel):
+    character_id: int
+    condition_name: str
+
+
+# Phase 3: Buff/debuff models
+class BuffDebuffRemoveRequest(BaseModel):
+    character_id: int
+    effect_name: str
+
+
+# Generic event model - accepts any event type
+class EventCreate(BaseModel):
+    """Generic event model that accepts any fields needed for any event type.
+    
+    The event type registry will validate which fields are actually required
+    for each specific event type.
+    """
+    type: str  # Required: the event type name (e.g., 'damage', 'initiative_roll', 'status_condition_applied')
+    character_id: Optional[int] = None
+    character_name: Optional[str] = None
+    amount: Optional[int] = None
+    initiative_value: Optional[int] = None
+    round_number: Optional[int] = None
+    condition_name: Optional[str] = None
+    duration_minutes: Optional[int] = None
+    # Phase 3: Buff/debuff fields
+    effect_name: Optional[str] = None
+    effect_type: Optional[str] = None  # 'buff' or 'debuff'
+    stat_modifications: Optional[Dict[str, Any]] = None  # e.g., {"ac": 2, "attack_rolls": 1}
+    stacking_rule: Optional[str] = None  # 'none', 'stack', 'replace', 'highest'
+    source: Optional[str] = None  # Optional: spell name, item name, etc.
+    # Phase 4: Spell cast fields
+    spell_name: Optional[str] = None
+    spell_level: Optional[int] = None  # 0-9, where 0 is cantrip
+    transcript_segment: Optional[str] = None
+
+
+@router.get('/')
+async def get_sessions(
+    campaign_id: Optional[int] = Query(None),
+    user_id: int = Depends(authenticate_token)
+) -> List[Dict[str, Any]]:
+    """Get all sessions for the authenticated user, optionally filtered by campaign."""
+    try:
+        db = get_database()
+        if campaign_id:
+            rows = db.execute(
+                'SELECT * FROM sessions WHERE user_id = ? AND campaign_id = ? ORDER BY started_at DESC',
+                (user_id, campaign_id)
+            ).fetchall()
+        else:
+            rows = db.execute(
+                'SELECT * FROM sessions WHERE user_id = ? ORDER BY started_at DESC',
+                (user_id,)
+            ).fetchall()
+        
+        sessions = [dict(row) for row in rows]
+        return sessions
+    except Exception as e:
+        print(f'Error fetching sessions: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.get('/{session_id}')
+async def get_session(session_id: int, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
+    """Get a single session by ID with characters and events."""
+    try:
+        db = get_database()
+        
+        # Get session
+        session_row = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session_row:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        session = dict(session_row)
+        
+        # Get session characters with character details
+        session_characters_rows = db.execute('''
+            SELECT 
+                sc.*,
+                c.name as character_name,
+                c.max_hp
+            FROM session_characters sc
+            JOIN characters c ON sc.character_id = c.id
+            WHERE sc.session_id = ?
+        ''', (session_id,)).fetchall()
+        
+        session_characters = [dict(row) for row in session_characters_rows]
+        
+        # Get damage events for this session
+        damage_events_rows = db.execute('''
+            SELECT 
+                de.*,
+                c.name as character_name
+            FROM damage_events de
+            JOIN characters c ON de.character_id = c.id
+            WHERE de.session_id = ?
+            ORDER BY de.timestamp DESC
+        ''', (session_id,)).fetchall()
+        
+        damage_events = [dict(row) for row in damage_events_rows]
+        
+        # Get spell events for this session
+        spell_events_rows = db.execute('''
+            SELECT 
+                se.id,
+                se.session_id,
+                se.character_id,
+                se.spell_name,
+                se.spell_level,
+                se.timestamp,
+                se.transcript_segment,
+                c.name as character_name
+            FROM spell_events se
+            JOIN characters c ON se.character_id = c.id
+            WHERE se.session_id = ?
+            ORDER BY se.timestamp DESC
+        ''', (session_id,)).fetchall()
+        
+        spell_events = [dict(row) for row in spell_events_rows]
+        
+        # Combine events (damage events and spell events) and sort by timestamp
+        all_events = []
+        for event in damage_events:
+            all_events.append({
+                **event,
+                'event_type': 'damage' if event['type'] == 'damage' else 'healing'
+            })
+        for event in spell_events:
+            all_events.append({
+                **event,
+                'event_type': 'spell_cast',
+                'type': 'spell_cast'  # For compatibility
+            })
+        
+        # Sort all events by timestamp descending
+        all_events.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
+        
+        return {
+            **session,
+            'characters': session_characters,
+            'events': all_events
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching session: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.post('/')
+async def create_session(session: SessionCreate, user_id: int = Depends(authenticate_token)) -> Dict[str, Any]:
+    """Create a new session."""
+    try:
+        if not session.name:
+            raise HTTPException(status_code=400, detail='Session name is required')
+        
+        db = get_database()
+        
+        # Verify campaign belongs to user if provided
+        if session.campaign_id:
+            campaign = db.execute(
+                'SELECT id FROM campaigns WHERE id = ? AND user_id = ?',
+                (session.campaign_id, user_id)
+            ).fetchone()
+            if not campaign:
+                raise HTTPException(status_code=400, detail='Campaign not found or does not belong to you')
+        
+        cursor = db.execute(
+            'INSERT INTO sessions (user_id, name, status, campaign_id) VALUES (?, ?, ?, ?)',
+            (user_id, session.name, 'active', session.campaign_id)
+        )
+        db.commit()
+        session_id = cursor.lastrowid
+        
+        row = db.execute('SELECT * FROM sessions WHERE id = ?', (session_id,)).fetchone()
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error creating session: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.put('/{session_id}')
+async def update_session(
+    session_id: int,
+    session_update: SessionUpdate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Update a session (e.g., end session, change name)."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        existing = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not existing:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Build update query dynamically
+        updates = []
+        values = []
+        
+        if session_update.name is not None:
+            updates.append('name = ?')
+            values.append(session_update.name)
+        if session_update.status is not None:
+            updates.append('status = ?')
+            values.append(session_update.status)
+        if session_update.ended_at is not None:
+            updates.append('ended_at = ?')
+            values.append(session_update.ended_at)
+        
+        if not updates:
+            raise HTTPException(status_code=400, detail='No fields to update')
+        
+        values.extend([session_id, user_id])
+        query = f'UPDATE sessions SET {", ".join(updates)} WHERE id = ? AND user_id = ?'
+        
+        db.execute(query, values)
+        db.commit()
+        
+        row = db.execute('SELECT * FROM sessions WHERE id = ?', (session_id,)).fetchone()
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error updating session: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.post('/{session_id}/characters')
+async def add_characters_to_session(
+    session_id: int,
+    request: AddCharactersRequest,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Add characters to a session."""
+    try:
+        if not isinstance(request.character_ids, list) or len(request.character_ids) == 0:
+            raise HTTPException(status_code=400, detail='character_ids must be a non-empty array')
+        
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify all characters belong to user and get their max_hp
+        placeholders = ','.join(['?'] * len(request.character_ids))
+        query = f'SELECT id, max_hp FROM characters WHERE id IN ({placeholders}) AND user_id = ?'
+        params = list(request.character_ids) + [user_id]
+        character_rows = db.execute(query, params).fetchall()
+        
+        characters = [dict(row) for row in character_rows]
+        
+        if len(characters) != len(request.character_ids):
+            raise HTTPException(
+                status_code=400,
+                detail='One or more characters not found or do not belong to you'
+            )
+        
+        # Insert session characters (use max_hp as starting_hp and current_hp)
+        # Use transaction
+        try:
+            for character in characters:
+                db.execute(
+                    'INSERT OR REPLACE INTO session_characters (session_id, character_id, starting_hp, current_hp) VALUES (?, ?, ?, ?)',
+                    (session_id, character['id'], character['max_hp'], character['max_hp'])
+                )
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            raise e
+        
+        # Return updated session with characters
+        session_characters_rows = db.execute('''
+            SELECT 
+                sc.*,
+                c.name as character_name,
+                c.max_hp
+            FROM session_characters sc
+            JOIN characters c ON sc.character_id = c.id
+            WHERE sc.session_id = ?
+        ''', (session_id,)).fetchall()
+        
+        session_characters = [dict(row) for row in session_characters_rows]
+        
+        return {
+            'message': 'Characters added to session',
+            'characters': session_characters
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error adding characters to session: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.get('/{session_id}/events')
+async def get_session_events(session_id: int, user_id: int = Depends(authenticate_token)) -> List[Dict[str, Any]]:
+    """Get events for a session."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        events_rows = db.execute('''
+            SELECT 
+                de.*,
+                c.name as character_name
+            FROM damage_events de
+            JOIN characters c ON de.character_id = c.id
+            WHERE de.session_id = ?
+            ORDER BY de.timestamp DESC
+        ''', (session_id,)).fetchall()
+        
+        events = [dict(row) for row in events_rows]
+        return events
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching session events: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# ============================================================================
+# BACKWARD COMPATIBILITY - DEPRECATED ENDPOINTS
+# These endpoints exist only for backward compatibility.
+# TODO: Remove these endpoints once all clients are migrated to /event endpoint
+# ============================================================================
+
+@router.post('/{session_id}/damage-event')
+async def create_damage_event(
+    session_id: int,
+    event: DamageEventCreate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """[DEPRECATED] Record a damage or healing event for a character in a session.
+    
+    DEPRECATED: Use POST /sessions/{id}/event instead.
+    This endpoint exists only for backward compatibility.
+    
+    Uses the event type registry to handle the event processing.
+    """
+    try:
+        # Get the event type handler
+        event_type = get_event_type_by_name(event.type)
+        if not event_type:
+            valid_types = ', '.join(get_registered_events().keys())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event type: {event.type}. Valid types: {valid_types}"
+            )
+        
+        # Convert Pydantic model to dict for validation and processing
+        event_data = {
+            'character_id': event.character_id,
+            'amount': event.amount,
+            'type': event.type,
+            'transcript_segment': event.transcript_segment
+        }
+        
+        # Validate using event type's validate method
+        if not event_type.validate(event_data):
+            raise HTTPException(
+                status_code=400,
+                detail='Event data validation failed'
+            )
+        
+        # Get database connection
+        db = get_database()
+        
+        # Delegate to event type's handler
+        result = await event_type.handle_event(event_data, session_id, user_id, db)
+        
+        return result
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error creating damage event: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 1: Combat event endpoint
+@router.post('/{session_id}/combat-event')
+async def create_combat_event(
+    session_id: int,
+    event: CombatEventCreate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """[DEPRECATED] Record a combat event (initiative roll, turn advance, round start).
+    
+    DEPRECATED: Use POST /sessions/{id}/event instead.
+    This endpoint exists only for backward compatibility.
+    """
+    try:
+        # Get the event type handler
+        event_type = get_event_type_by_name(event.event_type)
+        if not event_type:
+            valid_types = ', '.join(get_registered_events().keys())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event type: {event.event_type}. Valid types: {valid_types}"
+            )
+        
+        # Convert Pydantic model to dict for validation and processing
+        event_data = {
+            'type': event.event_type,
+            'transcript_segment': event.transcript_segment
+        }
+        
+        # Add type-specific fields
+        if event.character_id is not None:
+            event_data['character_id'] = event.character_id
+        if event.initiative_value is not None:
+            event_data['initiative_value'] = event.initiative_value
+        if event.round_number is not None:
+            event_data['round_number'] = event.round_number
+        
+        # Validate using event type's validate method
+        if not event_type.validate(event_data):
+            raise HTTPException(
+                status_code=400,
+                detail='Event data validation failed'
+            )
+        
+        # Get database connection
+        db = get_database()
+        
+        # Delegate to event type's handler
+        result = await event_type.handle_event(event_data, session_id, user_id, db)
+        
+        return result
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error creating combat event: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Generic event endpoint - handles all event types through the registry
+@router.post('/{session_id}/event')
+async def create_event(
+    session_id: int,
+    event: EventCreate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Generic endpoint for creating any type of event.
+    
+    Uses the event type registry to automatically:
+    - Validate the event data based on event type
+    - Process the event (save to DB, update state tables)
+    
+    This is the unified endpoint that replaces type-specific endpoints.
+    The frontend should use this for all events.
+    """
+    try:
+        # Get the event type handler from registry
+        event_type = get_event_type_by_name(event.type)
+        if not event_type:
+            valid_types = ', '.join(get_registered_events().keys())
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown event type: '{event.type}'. Valid types: {valid_types}"
+            )
+        
+        # Convert Pydantic model to dict, excluding None values
+        event_data = {
+            'type': event.type,
+        }
+        
+        # Add all non-None fields to event_data
+        if event.character_id is not None:
+            event_data['character_id'] = event.character_id
+        if event.character_name is not None:
+            event_data['character_name'] = event.character_name
+        if event.amount is not None:
+            event_data['amount'] = event.amount
+        if event.initiative_value is not None:
+            event_data['initiative_value'] = event.initiative_value
+        if event.round_number is not None:
+            event_data['round_number'] = event.round_number
+        if event.condition_name is not None:
+            event_data['condition_name'] = event.condition_name
+        if event.duration_minutes is not None:
+            event_data['duration_minutes'] = event.duration_minutes
+        # Phase 3: Buff/debuff fields
+        if event.effect_name is not None:
+            event_data['effect_name'] = event.effect_name
+        if event.effect_type is not None:
+            event_data['effect_type'] = event.effect_type
+        if event.stat_modifications is not None:
+            event_data['stat_modifications'] = event.stat_modifications
+        if event.stacking_rule is not None:
+            event_data['stacking_rule'] = event.stacking_rule
+        if event.source is not None:
+            event_data['source'] = event.source
+        # Phase 4: Spell cast fields
+        if event.spell_name is not None:
+            event_data['spell_name'] = event.spell_name
+        if event.spell_level is not None:
+            event_data['spell_level'] = event.spell_level
+        if event.transcript_segment is not None:
+            event_data['transcript_segment'] = event.transcript_segment
+        
+        # Validate using event type's validate method
+        if not event_type.validate(event_data):
+            raise HTTPException(
+                status_code=400,
+                detail='Event data validation failed'
+            )
+        
+        # Get database connection
+        db = get_database()
+        
+        # Delegate to event type's handler (this does all the work)
+        result = await event_type.handle_event(event_data, session_id, user_id, db)
+        
+        return result
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error creating event: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 1: Get initiative order
+@router.get('/{session_id}/initiative')
+async def get_initiative_order(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Get current initiative order for a session."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get combat state
+        combat_state = db.execute(
+            'SELECT * FROM combat_state WHERE session_id = ?',
+            (session_id,)
+        ).fetchone()
+        
+        # Get initiative order
+        initiative_rows = db.execute('''
+            SELECT 
+                io.character_id,
+                io.initiative_value,
+                io.turn_order,
+                c.name as character_name
+            FROM initiative_order io
+            JOIN characters c ON io.character_id = c.id
+            WHERE io.session_id = ?
+            ORDER BY io.turn_order ASC
+        ''', (session_id,)).fetchall()
+        
+        initiative_list = [dict(row) for row in initiative_rows]
+        
+        result = {
+            'initiative_order': initiative_list,
+            'combat_state': dict(combat_state) if combat_state else None
+        }
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching initiative order: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 1: Get full combat state
+@router.get('/{session_id}/combat-state')
+async def get_combat_state(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Get full combat state including round, current turn, and initiative order."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get combat state
+        combat_state = db.execute(
+            'SELECT * FROM combat_state WHERE session_id = ?',
+            (session_id,)
+        ).fetchone()
+        
+        if not combat_state:
+            return {
+                'is_active': False,
+                'current_round': 0,
+                'current_turn_character_id': None,
+                'initiative_order': []
+            }
+        
+        # Get initiative order with character names
+        initiative_rows = db.execute('''
+            SELECT 
+                io.character_id,
+                io.initiative_value,
+                io.turn_order,
+                c.name as character_name
+            FROM initiative_order io
+            JOIN characters c ON io.character_id = c.id
+            WHERE io.session_id = ?
+            ORDER BY io.turn_order ASC
+        ''', (session_id,)).fetchall()
+        
+        initiative_list = [dict(row) for row in initiative_rows]
+        
+        # Get current turn character name
+        current_turn_char_name = None
+        if combat_state['current_turn_character_id']:
+            char = db.execute(
+                'SELECT name FROM characters WHERE id = ?',
+                (combat_state['current_turn_character_id'],)
+            ).fetchone()
+            if char:
+                current_turn_char_name = char['name']
+        
+        return {
+            'is_active': bool(combat_state['is_active']),
+            'current_round': combat_state['current_round'],
+            'current_turn_character_id': combat_state['current_turn_character_id'],
+            'current_turn_character_name': current_turn_char_name,
+            'initiative_order': initiative_list
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching combat state: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 1: Manually advance turn
+@router.post('/{session_id}/initiative/advance')
+async def advance_turn(
+    session_id: int,
+    request: InitiativeAdvanceRequest,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Manually advance to the next turn in initiative order."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get combat state
+        combat_state = db.execute(
+            'SELECT * FROM combat_state WHERE session_id = ?',
+            (session_id,)
+        ).fetchone()
+        
+        if not combat_state or not combat_state['is_active']:
+            raise HTTPException(
+                status_code=400,
+                detail='Combat not active. Roll initiative first.'
+            )
+        
+        # Get current turn character
+        current_char_id = combat_state['current_turn_character_id']
+        if not current_char_id:
+            raise HTTPException(
+                status_code=400,
+                detail='No current turn set. Roll initiative first.'
+            )
+        
+        # Get current turn order
+        current_turn = db.execute(
+            'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
+            (session_id, current_char_id)
+        ).fetchone()
+        
+        if not current_turn:
+            raise HTTPException(
+                status_code=400,
+                detail='Current character not in initiative order'
+            )
+        
+        # Get next character in order
+        next_char = db.execute(
+            '''SELECT character_id FROM initiative_order 
+               WHERE session_id = ? AND turn_order > ?
+               ORDER BY turn_order ASC LIMIT 1''',
+            (session_id, current_turn['turn_order'])
+        ).fetchone()
+        
+        if next_char:
+            # Move to next character
+            db.execute(
+                'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
+                (next_char['character_id'], session_id)
+            )
+        else:
+            # Wrap around to first character and increment round
+            first_char = db.execute(
+                '''SELECT character_id FROM initiative_order 
+                   WHERE session_id = ? 
+                   ORDER BY turn_order ASC LIMIT 1''',
+                (session_id,)
+            ).fetchone()
+            
+            if first_char:
+                db.execute(
+                    '''UPDATE combat_state 
+                       SET current_turn_character_id = ?, current_round = current_round + 1 
+                       WHERE session_id = ?''',
+                    (first_char['character_id'], session_id)
+                )
+        
+        db.commit()
+        
+        # Return updated combat state
+        return await get_combat_state(session_id, user_id)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db = get_database()
+        db.rollback()
+        print(f'Error advancing turn: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 1: Manually reorder initiative
+@router.post('/{session_id}/initiative/reorder')
+async def reorder_initiative(
+    session_id: int,
+    request: InitiativeReorderRequest,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Manually reorder initiative for a session."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Update turn orders
+        for char_order in request.character_orders:
+            char_id = char_order.get('character_id')
+            turn_order = char_order.get('turn_order')
+            
+            if char_id is None or turn_order is None:
+                continue
+            
+            # Verify character is in session
+            session_char = db.execute(
+                'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+                (session_id, char_id)
+            ).fetchone()
+            
+            if not session_char:
+                continue
+            
+            # Update turn order
+            db.execute(
+                'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
+                (turn_order, session_id, char_id)
+            )
+        
+        db.commit()
+        
+        # Return updated initiative order
+        return await get_initiative_order(session_id, user_id)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db = get_database()
+        db.rollback()
+        print(f'Error reordering initiative: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 2: Get status conditions
+@router.get('/{session_id}/status-conditions')
+async def get_status_conditions(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> List[Dict[str, Any]]:
+    """Get all active status conditions for a session."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get active status conditions with character names
+        condition_rows = db.execute('''
+            SELECT 
+                asc.*,
+                c.name as character_name
+            FROM active_status_conditions asc
+            JOIN characters c ON asc.character_id = c.id
+            WHERE asc.session_id = ?
+            ORDER BY asc.character_id, asc.condition_name
+        ''', (session_id,)).fetchall()
+        
+        conditions = []
+        for row in condition_rows:
+            condition_dict = dict(row)
+            # Check if condition has expired
+            if condition_dict.get('expires_at'):
+                import datetime
+                expires_at = datetime.datetime.fromisoformat(condition_dict['expires_at'])
+                if datetime.datetime.now() > expires_at:
+                    # Condition has expired, remove it
+                    db.execute(
+                        '''DELETE FROM active_status_conditions 
+                           WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+                        (session_id, condition_dict['character_id'], condition_dict['condition_name'])
+                    )
+                    continue
+            conditions.append(condition_dict)
+        
+        db.commit()
+        return conditions
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching status conditions: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 2: Remove status condition
+@router.post('/{session_id}/status-conditions/remove')
+async def remove_status_condition(
+    session_id: int,
+    request: StatusConditionRemoveRequest,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Manually remove a status condition from a character."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify character is in the session
+        session_character = db.execute(
+            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+            (session_id, request.character_id)
+        ).fetchone()
+        
+        if not session_character:
+            raise HTTPException(
+                status_code=400,
+                detail='Character is not in this session'
+            )
+        
+        # Check if condition exists
+        condition = db.execute(
+            '''SELECT * FROM active_status_conditions 
+               WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+            (session_id, request.character_id, request.condition_name)
+        ).fetchone()
+        
+        if not condition:
+            raise HTTPException(
+                status_code=404,
+                detail='Status condition not found'
+            )
+        
+        # Insert removal event
+        db.execute(
+            '''INSERT INTO status_condition_events 
+               (session_id, character_id, condition_name, action, transcript_segment)
+               VALUES (?, ?, ?, ?, ?)''',
+            (
+                session_id,
+                request.character_id,
+                request.condition_name,
+                'removed',
+                f'Manually removed by user'
+            )
+        )
+        
+        # Remove from active status conditions
+        db.execute(
+            '''DELETE FROM active_status_conditions 
+               WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+            (session_id, request.character_id, request.condition_name)
+        )
+        
+        db.commit()
+        
+        return {
+            'message': 'Status condition removed successfully',
+            'character_id': request.character_id,
+            'condition_name': request.condition_name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db = get_database()
+        db.rollback()
+        print(f'Error removing status condition: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 3: Get active buffs/debuffs for a session
+@router.get('/{session_id}/buffs-debuffs')
+async def get_buffs_debuffs(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> List[Dict[str, Any]]:
+    """Get all active buffs/debuffs for a session."""
+    import json
+    import datetime
+    
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get active buffs/debuffs with character names
+        effect_rows = db.execute('''
+            SELECT 
+                abd.*,
+                c.name as character_name
+            FROM active_buff_debuffs abd
+            JOIN characters c ON abd.character_id = c.id
+            WHERE abd.session_id = ?
+            ORDER BY abd.character_id, abd.effect_name
+        ''', (session_id,)).fetchall()
+        
+        effects = []
+        for row in effect_rows:
+            effect_dict = dict(row)
+            # Parse stat_modifications JSON
+            if effect_dict.get('stat_modifications'):
+                effect_dict['stat_modifications'] = json.loads(effect_dict['stat_modifications'])
+            else:
+                effect_dict['stat_modifications'] = {}
+            
+            # Check if effect has expired
+            if effect_dict.get('expires_at'):
+                expires_at_str = effect_dict['expires_at']
+                if isinstance(expires_at_str, str):
+                    expires_at = datetime.datetime.fromisoformat(expires_at_str.replace(' ', 'T'))
+                else:
+                    expires_at = expires_at_str
+                if datetime.datetime.now() > expires_at:
+                    # Effect has expired, remove it
+                    db.execute(
+                        '''DELETE FROM active_buff_debuffs 
+                           WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                        (session_id, effect_dict['character_id'], effect_dict['effect_name'])
+                    )
+                    continue
+            effects.append(effect_dict)
+        
+        db.commit()
+        return effects
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching buffs/debuffs: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 3: Get active buffs/debuffs for a specific character
+@router.get('/{session_id}/characters/{character_id}/buffs-debuffs')
+async def get_character_buffs_debuffs(
+    session_id: int,
+    character_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> List[Dict[str, Any]]:
+    """Get all active buffs/debuffs for a specific character in a session."""
+    import json
+    import datetime
+    
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify character is in the session
+        session_character = db.execute(
+            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+            (session_id, character_id)
+        ).fetchone()
+        
+        if not session_character:
+            raise HTTPException(
+                status_code=400,
+                detail='Character is not in this session'
+            )
+        
+        # Get active buffs/debuffs for this character
+        effect_rows = db.execute('''
+            SELECT 
+                abd.*,
+                c.name as character_name
+            FROM active_buff_debuffs abd
+            JOIN characters c ON abd.character_id = c.id
+            WHERE abd.session_id = ? AND abd.character_id = ?
+            ORDER BY abd.effect_name
+        ''', (session_id, character_id)).fetchall()
+        
+        effects = []
+        for row in effect_rows:
+            effect_dict = dict(row)
+            # Parse stat_modifications JSON
+            if effect_dict.get('stat_modifications'):
+                effect_dict['stat_modifications'] = json.loads(effect_dict['stat_modifications'])
+            else:
+                effect_dict['stat_modifications'] = {}
+            
+            # Check if effect has expired
+            if effect_dict.get('expires_at'):
+                expires_at_str = effect_dict['expires_at']
+                if isinstance(expires_at_str, str):
+                    expires_at = datetime.datetime.fromisoformat(expires_at_str.replace(' ', 'T'))
+                else:
+                    expires_at = expires_at_str
+                if datetime.datetime.now() > expires_at:
+                    # Effect has expired, remove it
+                    db.execute(
+                        '''DELETE FROM active_buff_debuffs 
+                           WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                        (session_id, character_id, effect_dict['effect_name'])
+                    )
+                    continue
+            effects.append(effect_dict)
+        
+        db.commit()
+        return effects
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching character buffs/debuffs: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 3: Remove buff/debuff
+@router.post('/{session_id}/buffs-debuffs/remove')
+async def remove_buff_debuff(
+    session_id: int,
+    request: BuffDebuffRemoveRequest,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Manually remove a buff/debuff from a character."""
+    import json
+    
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify character is in the session
+        session_character = db.execute(
+            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+            (session_id, request.character_id)
+        ).fetchone()
+        
+        if not session_character:
+            raise HTTPException(
+                status_code=400,
+                detail='Character is not in this session'
+            )
+        
+        # Check if effect exists
+        effect = db.execute(
+            '''SELECT * FROM active_buff_debuffs 
+               WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+            (session_id, request.character_id, request.effect_name)
+        ).fetchone()
+        
+        if not effect:
+            raise HTTPException(
+                status_code=404,
+                detail='Buff/debuff not found'
+            )
+        
+        # Insert removal event
+        db.execute(
+            '''INSERT INTO buff_debuff_events 
+               (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, transcript_segment)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                session_id,
+                request.character_id,
+                request.effect_name,
+                effect['effect_type'],
+                'removed',
+                effect['stat_modifications'],
+                effect['stacking_rule'],
+                'Manually removed by user'
+            )
+        )
+        
+        # Remove from active buffs/debuffs
+        db.execute(
+            '''DELETE FROM active_buff_debuffs 
+               WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+            (session_id, request.character_id, request.effect_name)
+        )
+        
+        db.commit()
+        
+        return {
+            'message': 'Buff/debuff removed successfully',
+            'character_id': request.character_id,
+            'effect_name': request.effect_name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db = get_database()
+        db.rollback()
+        print(f'Error removing buff/debuff: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 4: Get spell slot usage for a session
+@router.get('/{session_id}/spell-slots')
+async def get_spell_slots(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Get spell slot usage for all characters in a session.
+    
+    Returns a dictionary mapping character_id to their spell slot usage:
+    {
+        "1": {
+            "character_id": 1,
+            "character_name": "Wizard",
+            "slots_by_level": {
+                "1": 3,  // 3 first-level slots used
+                "2": 1,  // 1 second-level slot used
+                "3": 0   // 0 third-level slots used
+            }
+        },
+        ...
+    }
+    """
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get spell slot usage with character names
+        slot_rows = db.execute('''
+            SELECT 
+                css.*,
+                c.name as character_name
+            FROM character_spell_slots css
+            JOIN characters c ON css.character_id = c.id
+            WHERE css.session_id = ?
+            ORDER BY css.character_id, css.spell_level
+        ''', (session_id,)).fetchall()
+        
+        # Group by character
+        spell_slots_by_character = {}
+        for row in slot_rows:
+            char_id = row['character_id']
+            if char_id not in spell_slots_by_character:
+                spell_slots_by_character[char_id] = {
+                    'character_id': char_id,
+                    'character_name': row['character_name'],
+                    'slots_by_level': {}
+                }
+            spell_slots_by_character[char_id]['slots_by_level'][str(row['spell_level'])] = row['slots_used']
+        
+        return spell_slots_by_character
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching spell slots: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 4: Get spell slot usage for a specific character
+@router.get('/{session_id}/characters/{character_id}/spell-slots')
+async def get_character_spell_slots(
+    session_id: int,
+    character_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Get spell slot usage for a specific character in a session."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify character is in the session
+        session_character = db.execute(
+            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+            (session_id, character_id)
+        ).fetchone()
+        
+        if not session_character:
+            raise HTTPException(status_code=404, detail='Character not found in session')
+        
+        # Get character name
+        character = db.execute(
+            'SELECT name FROM characters WHERE id = ?',
+            (character_id,)
+        ).fetchone()
+        
+        if not character:
+            raise HTTPException(status_code=404, detail='Character not found')
+        
+        # Get spell slot usage
+        slot_rows = db.execute('''
+            SELECT spell_level, slots_used
+            FROM character_spell_slots
+            WHERE session_id = ? AND character_id = ?
+            ORDER BY spell_level
+        ''', (session_id, character_id)).fetchall()
+        
+        slots_by_level = {}
+        for row in slot_rows:
+            slots_by_level[str(row['spell_level'])] = row['slots_used']
+        
+        return {
+            'character_id': character_id,
+            'character_name': character['name'],
+            'slots_by_level': slots_by_level
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching character spell slots: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+# Phase 4: Reset spell slots for a character (optional utility)
+@router.post('/{session_id}/characters/{character_id}/spell-slots/reset')
+async def reset_character_spell_slots(
+    session_id: int,
+    character_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Reset spell slot usage for a character (set all to 0)."""
+    try:
+        db = get_database()
+        
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Verify character is in the session
+        session_character = db.execute(
+            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+            (session_id, character_id)
+        ).fetchone()
+        
+        if not session_character:
+            raise HTTPException(status_code=404, detail='Character not found in session')
+        
+        # Delete all spell slot records for this character
+        db.execute('''
+            DELETE FROM character_spell_slots
+            WHERE session_id = ? AND character_id = ?
+        ''', (session_id, character_id))
+        
+        db.commit()
+        
+        return {
+            'message': 'Spell slots reset successfully',
+            'character_id': character_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        db = get_database()
+        db.rollback()
+        print(f'Error resetting spell slots: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.get('/{session_id}/transcripts')
+async def get_session_transcripts(
+    session_id: int,
+    limit: int = Query(200, ge=1, le=1000),
+    after_id: Optional[int] = Query(None, ge=0),
+    user_id: int = Depends(authenticate_token)
+) -> List[Dict[str, Any]]:
+    """Get persisted transcript segments for a session."""
+    try:
+        db = get_database()
+
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+
+        if after_id is None:
+            rows = db.execute(
+                '''
+                SELECT *
+                FROM session_transcripts
+                WHERE session_id = ?
+                ORDER BY id ASC
+                LIMIT ?
+                ''',
+                (session_id, limit)
+            ).fetchall()
+        else:
+            rows = db.execute(
+                '''
+                SELECT *
+                FROM session_transcripts
+                WHERE session_id = ? AND id > ?
+                ORDER BY id ASC
+                LIMIT ?
+                ''',
+                (session_id, after_id, limit)
+            ).fetchall()
+
+        return [dict(r) for r in rows]
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error fetching session transcripts: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.post('/{session_id}/transcripts')
+async def create_session_transcript_segment(
+    session_id: int,
+    segment: TranscriptSegmentCreate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Create (or de-dupe) a persisted transcript segment for a session."""
+    try:
+        if not segment.client_chunk_id or not segment.text:
+            raise HTTPException(status_code=400, detail='client_chunk_id and text are required')
+
+        db = get_database()
+
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+
+        # Insert with de-dupe (unique(session_id, client_chunk_id))
+        db.execute(
+            '''
+            INSERT OR IGNORE INTO session_transcripts
+              (session_id, client_chunk_id, client_timestamp_ms, text, speaker)
+            VALUES (?, ?, ?, ?, ?)
+            ''',
+            (session_id, segment.client_chunk_id, segment.client_timestamp_ms, segment.text, segment.speaker)
+        )
+        db.commit()
+
+        row = db.execute(
+            '''
+            SELECT *
+            FROM session_transcripts
+            WHERE session_id = ? AND client_chunk_id = ?
+            ''',
+            (session_id, segment.client_chunk_id)
+        ).fetchone()
+
+        if not row:
+            raise HTTPException(status_code=500, detail='Failed to create transcript segment')
+
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error creating session transcript segment: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.put('/{session_id}/transcripts/{transcript_id}')
+async def update_session_transcript_segment(
+    session_id: int,
+    transcript_id: int,
+    update: TranscriptSegmentUpdate,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Update a transcript segment (speaker and/or text) for a session."""
+    try:
+        db = get_database()
+
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+
+        existing = db.execute(
+            'SELECT * FROM session_transcripts WHERE id = ? AND session_id = ?',
+            (transcript_id, session_id)
+        ).fetchone()
+        if not existing:
+            raise HTTPException(status_code=404, detail='Transcript segment not found')
+
+        updates = []
+        values = []
+
+        if update.text is not None:
+            updates.append('text = ?')
+            values.append(update.text)
+        if update.speaker is not None:
+            updates.append('speaker = ?')
+            values.append(update.speaker)
+
+        if not updates:
+            raise HTTPException(status_code=400, detail='No fields to update')
+
+        values.extend([transcript_id, session_id])
+        query = f'UPDATE session_transcripts SET {", ".join(updates)} WHERE id = ? AND session_id = ?'
+        db.execute(query, values)
+        db.commit()
+
+        row = db.execute(
+            'SELECT * FROM session_transcripts WHERE id = ? AND session_id = ?',
+            (transcript_id, session_id)
+        ).fetchone()
+        return dict(row)
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error updating session transcript segment: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.delete('/{session_id}/transcripts')
+async def clear_session_transcripts(
+    session_id: int,
+    user_id: int = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Delete all persisted transcript segments for a session."""
+    try:
+        db = get_database()
+
+        # Verify session belongs to user
+        session = db.execute(
+            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
+            (session_id, user_id)
+        ).fetchone()
+        if not session:
+            raise HTTPException(status_code=404, detail='Session not found')
+
+        db.execute('DELETE FROM session_transcripts WHERE session_id = ?', (session_id,))
+        db.commit()
+        return {'message': 'Transcripts cleared'}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f'Error clearing session transcripts: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
