@@ -30,9 +30,20 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # Configure CORS
+# When allow_credentials=True, we cannot use allow_origins=["*"]
+# We need to specify exact origins
+allowed_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://localhost:3000,http://localhost:8080,https://eoas-529682581088.europe-west1.run.app"
+).split(",")
+# Strip whitespace from each origin
+allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
+
+logger.info(f"CORS allowed origins: {allowed_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify actual origins
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
