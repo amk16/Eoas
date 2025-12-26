@@ -22,6 +22,7 @@ export default function SessionSetup() {
   const fetchCampaigns = async () => {
     try {
       const response = await api.get('/campaigns');
+      console.log('[Campaigns API] GET /campaigns - Response:', response.data);
       setCampaigns(response.data);
     } catch (err: any) {
       console.error('Failed to load campaigns:', err);

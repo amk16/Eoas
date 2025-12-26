@@ -61,6 +61,7 @@ export default function CampaignWizardDrawer({
     api
       .get(`/campaigns/${campaignId}`)
       .then((r) => {
+        console.log(`[Campaigns API] GET /campaigns/${campaignId} - Response:`, r.data);
         const c: Campaign = r.data;
         setDraft({ name: c.name, description: c.description || '' });
       })
@@ -79,9 +80,11 @@ export default function CampaignWizardDrawer({
         description: draft.description.trim() || null,
       };
       if (mode === 'edit' && campaignId) {
-        await api.put(`/campaigns/${campaignId}`, payload);
+        const response = await api.put(`/campaigns/${campaignId}`, payload);
+        console.log(`[Campaigns API] PUT /campaigns/${campaignId} - Response:`, response.data);
       } else {
-        await api.post('/campaigns', payload);
+        const response = await api.post('/campaigns', payload);
+        console.log('[Campaigns API] POST /campaigns - Response:', response.data);
       }
       onSaved();
       onClose();

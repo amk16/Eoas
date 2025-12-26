@@ -24,6 +24,7 @@ export default function CampaignForm() {
     try {
       setLoading(true);
       const response = await api.get(`/campaigns/${id}`);
+      console.log(`[Campaigns API] GET /campaigns/${id} - Response:`, response.data);
       const campaign: Campaign = response.data;
       setName(campaign.name);
       setDescription(campaign.description || '');
@@ -41,15 +42,17 @@ export default function CampaignForm() {
 
     try {
       if (isEdit) {
-        await api.put(`/campaigns/${id}`, {
+        const response = await api.put(`/campaigns/${id}`, {
           name,
           description: description || null,
         });
+        console.log(`[Campaigns API] PUT /campaigns/${id} - Response:`, response.data);
       } else {
-        await api.post('/campaigns', {
+        const response = await api.post('/campaigns', {
           name,
           description: description || null,
         });
+        console.log('[Campaigns API] POST /campaigns - Response:', response.data);
       }
       navigate('/campaigns');
     } catch (err: any) {

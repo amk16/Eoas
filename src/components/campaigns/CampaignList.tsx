@@ -29,6 +29,7 @@ export default function CampaignList() {
     try {
       setLoading(true);
       const response = await api.get('/campaigns');
+      console.log('[Campaigns API] GET /campaigns - Response:', response.data);
       setCampaigns(response.data);
       setError('');
     } catch (err: any) {
@@ -45,7 +46,8 @@ export default function CampaignList() {
     }
 
     try {
-      await api.delete(`/campaigns/${id}`);
+      const response = await api.delete(`/campaigns/${id}`);
+      console.log(`[Campaigns API] DELETE /campaigns/${id} - Response:`, response.data);
       setCampaigns(campaigns.filter((c) => c.id !== id));
     } catch (err: any) {
       alert(err.response?.data?.error || 'Failed to delete campaign');
