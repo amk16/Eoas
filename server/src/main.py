@@ -32,12 +32,24 @@ app = FastAPI()
 # Configure CORS
 # When allow_credentials=True, we cannot use allow_origins=["*"]
 # We need to specify exact origins
-allowed_origins = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://localhost:3000,http://localhost:8080,https://eoas-529682581088.europe-west1.run.app"
-).split(",")
-# Strip whitespace from each origin
-allowed_origins = [origin.strip() for origin in allowed_origins if origin.strip()]
+default_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://localhost:8080",
+    "https://eoas-529682581088.europe-west1.run.app"
+]
+
+cors_origins_env = os.getenv("CORS_ORIGINS", "")
+if cors_origins_env:
+    # Parse environment variable (comma-separated)
+    allowed_origins = [origin.strip() for origin in cors_origins_env.split(",") if origin.strip()]
+else:
+    allowed_origins = default_origins
+
+# Ensure production origin is always included
+production_origin = "https://eoas-529682581088.europe-west1.run.app"
+if production_origin not in allowed_origins:
+    allowed_origins.append(production_origin)
 
 logger.info(f"CORS allowed origins: {allowed_origins}")
 
@@ -45,8 +57,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,
 )
 
 # Initialize database on startup
