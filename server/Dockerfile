@@ -30,9 +30,13 @@ COPY src/ ./src/
 # Create necessary directories
 RUN mkdir -p data uploads/character_images temp
 
+# Set default port (Cloud Run will override with PORT env var)
+ENV PORT=8080
+
 # Expose port (Cloud Run sets PORT env var)
 EXPOSE 8080
 
 # Run uvicorn (PORT is set by Cloud Run, defaults to 8080)
-CMD ["sh", "-c", "uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Use python -m uvicorn to ensure proper module resolution
+CMD ["sh", "-c", "echo Starting server on port ${PORT:-8080} && python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
 
