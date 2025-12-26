@@ -68,13 +68,8 @@ async def register(request: RegisterRequest):
 @router.post('/login')
 async def login(request: LoginRequest):
     """Login user."""
-    import logging
-    logger = logging.getLogger(__name__)
-    
     email = request.email
     password = request.password
-    
-    logger.info(f"Login attempt for email: {email}")
     
     db = get_database()
     
@@ -85,28 +80,19 @@ async def login(request: LoginRequest):
     ).fetchone()
     
     if not user:
-        logger.warning(f"Login failed: User not found for email: {email}")
         raise HTTPException(status_code=401, detail='Invalid email or password')
     
-    logger.info(f"User found: id={user['id']}, email={user['email']}")
-    
     # Verify password
-    try:
-        password_match = bcrypt.checkpw(
-            password.encode('utf-8'),
-            user['password_hash'].encode('utf-8')
-        )
-        if not password_match:
-            logger.warning(f"Login failed: Invalid password for email: {email}")
-            raise HTTPException(status_code=401, detail='Invalid email or password')
-    except Exception as e:
-        logger.error(f"Password verification error: {e}")
+    password_match = bcrypt.checkpw(
+        password.encode('utf-8'),
+        user['password_hash'].encode('utf-8')
+    )
+    if not password_match:
         raise HTTPException(status_code=401, detail='Invalid email or password')
     
     # Generate JWT token
     jwt_secret = os.getenv('JWT_SECRET')
     if not jwt_secret:
-        logger.error("JWT_SECRET not configured")
         raise HTTPException(status_code=500, detail='JWT secret not configured')
     
     token = jwt.encode(
@@ -114,8 +100,6 @@ async def login(request: LoginRequest):
         jwt_secret,
         algorithm='HS256'
     )
-    
-    logger.info(f"Login successful for user: {email}")
     
     return {
         'message': 'Login successful',
