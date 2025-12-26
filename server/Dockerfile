@@ -6,14 +6,17 @@ WORKDIR /app
 
 # Install system dependencies
 # ffmpeg is required for pydub audio processing
+# bash is needed for the startup script
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     ffmpeg \
+    bash \
     && rm -rf /var/lib/apt/lists/*
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
 
 # Copy requirements file
 COPY requirements.txt .
@@ -30,13 +33,16 @@ COPY src/ ./src/
 # Create necessary directories
 RUN mkdir -p data uploads/character_images temp
 
+# Copy startup script
+COPY start_server.sh ./
+RUN chmod +x start_server.sh
+
 # Set default port (Cloud Run will override with PORT env var)
 ENV PORT=8080
 
 # Expose port (Cloud Run sets PORT env var)
 EXPOSE 8080
 
-# Run uvicorn (PORT is set by Cloud Run, defaults to 8080)
-# Use python -m uvicorn to ensure proper module resolution
-CMD ["sh", "-c", "echo Starting server on port ${PORT:-8080} && python -m uvicorn src.main:app --host 0.0.0.0 --port ${PORT:-8080}"]
+# Use startup script for better error handling
+CMD ["./start_server.sh"]
 
