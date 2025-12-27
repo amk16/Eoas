@@ -43,26 +43,18 @@ def create_tables() -> None:
     if not _db:
         raise RuntimeError('Database not initialized')
     
-    # Users table
-    _db.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    # Note: Users are now stored in Firebase/Firestore, not SQLite
+    # user_id columns now store Firebase UIDs (strings) instead of integer IDs
     
     # Campaigns table
     _db.execute('''
         CREATE TABLE IF NOT EXISTS campaigns (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             name TEXT NOT NULL,
             description TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -70,7 +62,7 @@ def create_tables() -> None:
     _db.execute('''
         CREATE TABLE IF NOT EXISTS characters (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             campaign_id INTEGER,
             name TEXT NOT NULL,
             max_hp INTEGER NOT NULL,
@@ -87,7 +79,6 @@ def create_tables() -> None:
             art_prompt TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL
         )
     ''')
@@ -96,13 +87,12 @@ def create_tables() -> None:
     _db.execute('''
         CREATE TABLE IF NOT EXISTS sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
             campaign_id INTEGER,
             name TEXT NOT NULL,
             started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             ended_at DATETIME,
             status TEXT DEFAULT 'active',
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
             FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL
         )
     ''')
@@ -393,6 +383,21 @@ def create_tables() -> None:
         CREATE INDEX IF NOT EXISTS idx_character_spell_slots_session_character
         ON character_spell_slots (session_id, character_id)
     ''')
+    
+    # Migration: Convert user_id from INTEGER to TEXT for Firebase UIDs
+    try:
+        # Check if user_id column exists and is INTEGER type
+        cursor = _db.execute("PRAGMA table_info(campaigns)")
+        columns = {row[1]: row[2] for row in cursor.fetchall()}
+        if 'user_id' in columns and columns['user_id'].upper() == 'INTEGER':
+            logger.info("Migrating user_id columns from INTEGER to TEXT for Firebase UIDs...")
+            # SQLite doesn't support ALTER COLUMN, so we need to recreate tables
+            # For now, we'll just log a warning - users will need to migrate data manually
+            # or recreate the database
+            logger.warning("Existing database has INTEGER user_id. Migration to TEXT required.")
+            logger.warning("Consider backing up data and recreating tables, or running a migration script.")
+    except Exception as e:
+        logger.warning(f"Error checking user_id migration: {e}")
     
     # Add campaign_id columns to existing tables if they don't exist (migration)
     try:

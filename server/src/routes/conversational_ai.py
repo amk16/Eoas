@@ -35,7 +35,7 @@ class ConfirmActionRequest(BaseModel):
 
 @router.get("/conversational-ai/token")
 async def get_conversation_token(
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """
     Generate a single-use token for ElevenLabs Conversational AI.
@@ -88,7 +88,7 @@ async def get_conversation_token(
 @router.post("/conversational-ai/action")
 async def handle_assistant_action(
     request: ActionRequest,
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """
     Handle an action proposed by the assistant.
@@ -139,7 +139,7 @@ async def handle_assistant_action(
 @router.post("/conversational-ai/confirm")
 async def confirm_action(
     request: ConfirmActionRequest,
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """
     Confirm and execute a pending action, or reject it.
@@ -575,7 +575,7 @@ async def confirm_action(
 
 @router.get("/conversational-ai/pending-actions")
 async def get_pending_actions(
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> List[Dict[str, Any]]:
     """
     Get all pending actions for the authenticated user.

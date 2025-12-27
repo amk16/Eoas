@@ -37,3 +37,4 @@ CharacterDetailView.displayName = 'CharacterDetailView';
 
 
 
+

@@ -1,6 +1,8 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import os
 import sys
@@ -15,6 +17,7 @@ if str(server_dir) not in sys.path:
     sys.path.insert(0, str(server_dir))
 
 from src.db.database import init_database
+from src.db.firebase import init_firebase
 from src.routes import auth, characters, sessions, campaigns, audio, scribe_token, analyze, conversational_ai, images
 
 # Load environment variables
@@ -30,6 +33,24 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Add exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Provide detailed validation error messages."""
+    errors = []
+    for error in exc.errors():
+        field = ".".join(str(loc) for loc in error["loc"])
+        message = error["msg"]
+        errors.append(f"{field}: {message}")
+    
+    error_message = "Validation error: " + "; ".join(errors)
+    logger.warning(f"Validation error on {request.url.path}: {error_message}")
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={"detail": error_message, "errors": exc.errors()}
+    )
 
 # Configure CORS
 # When allow_credentials=True, we cannot use allow_origins=["*"]
@@ -72,7 +93,22 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     logger.info("Starting D&D Tracker Server...")
+    
+    # Initialize SQLite database (for campaigns, characters, sessions)
     init_database()
+    
+    # Initialize Firebase (for authentication and user data)
+    try:
+        init_firebase()
+        logger.info("Firebase initialized successfully")
+    except Exception as e:
+        logger.error(f"Firebase initialization failed: {e}")
+        logger.error("Authentication endpoints will not work without Firebase.")
+        # Log what's missing
+        if not os.getenv('FIREBASE_PROJECT_ID'):
+            logger.error("  - FIREBASE_PROJECT_ID is not set")
+        if not os.getenv('FIREBASE_CREDENTIALS_JSON') and not os.getenv('FIREBASE_CREDENTIALS_PATH') and not os.getenv('GOOGLE_APPLICATION_CREDENTIALS'):
+            logger.error("  - Firebase credentials not found. Set one of: FIREBASE_CREDENTIALS_JSON, FIREBASE_CREDENTIALS_PATH, or GOOGLE_APPLICATION_CREDENTIALS")
     
     # Ensure uploads directory exists for character images
     server_dir = Path(__file__).parent.parent

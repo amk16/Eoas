@@ -69,7 +69,7 @@ class EventType(ABC):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Processes the event (e.g., save to database, update character state).
@@ -150,7 +150,7 @@ class DamageEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle damage event: save to database and update character HP."""
@@ -296,7 +296,7 @@ class HealingEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle healing event: save to database and update character HP."""
@@ -436,7 +436,7 @@ class InitiativeRollEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle initiative roll: save event and update initiative order."""
@@ -622,7 +622,7 @@ DO NOT DETECT phrases like:
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle turn advance: move to next character in initiative order.
@@ -809,7 +809,7 @@ class RoundStartEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle round start: increment round and set to first character."""
@@ -1010,7 +1010,7 @@ class StatusConditionAppliedEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle status condition applied: save event and add to active conditions."""
@@ -1141,7 +1141,7 @@ class StatusConditionRemovedEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle status condition removed: save event and remove from active conditions."""
@@ -1244,7 +1244,7 @@ class CombatEndEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle combat end: deactivate combat state and clear current turn."""
@@ -1395,7 +1395,7 @@ class BuffDebuffAppliedEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle buff/debuff applied: save event and add to active effects with stacking logic."""
@@ -1626,7 +1626,7 @@ class BuffDebuffRemovedEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Handle buff/debuff removed: save event and remove from active effects."""
@@ -1758,7 +1758,7 @@ class SpellCastEventType(EventType):
         self,
         event_data: Dict[str, Any],
         session_id: int,
-        user_id: int,
+        user_id: str,
         db: Any
     ) -> Dict[str, Any]:
         """Process spell cast event: save event and update spell slot usage."""

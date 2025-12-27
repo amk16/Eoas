@@ -6,7 +6,7 @@ from ..db.database import get_database
 logger = logging.getLogger(__name__)
 
 
-async def get_user_context(user_id: int) -> Dict[str, Any]:
+async def get_user_context(user_id: str) -> Dict[str, Any]:
     """
     Gather all relevant context about a user's campaigns, sessions, and characters.
     This context is used to inform the voice assistant about the user's data.
@@ -121,7 +121,7 @@ async def get_user_context(user_id: int) -> Dict[str, Any]:
         }
 
 
-async def get_session_context(session_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+async def get_session_context(session_id: int, user_id: str) -> Optional[Dict[str, Any]]:
     """
     Get detailed context for a specific session, including characters and recent events.
     

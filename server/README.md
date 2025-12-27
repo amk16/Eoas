@@ -17,6 +17,12 @@ cp .env.example .env
 3. Update `.env` with your API keys:
 - `JWT_SECRET`: A random secret string for JWT token signing
 - `GEMINI_API_KEY`: Your Google Gemini API key (needed for Phase 7)
+- `FIREBASE_PROJECT_ID`: Your Firebase project ID (for Firebase Authentication)
+- `FIREBASE_CREDENTIALS_JSON`: Firebase service account JSON as a string (recommended for deployment)
+  - OR `FIREBASE_CREDENTIALS_PATH`: Path to Firebase service account JSON file
+  - OR `GOOGLE_APPLICATION_CREDENTIALS`: Path to credentials file (GCP standard)
+- `FIREBASE_WEB_API_KEY`: Firebase Web API Key (found in Firebase Console > Project Settings > General > Web API Key)
+  - Required for password authentication via REST API
 
 ## Running
 

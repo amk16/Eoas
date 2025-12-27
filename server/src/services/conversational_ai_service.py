@@ -20,7 +20,7 @@ CONVERSATIONAL_AI_MODEL = "eleven_multilingual_v2"
 
 
 async def create_conversation_token(
-    user_id: int,
+    user_id: str,
     system_prompt: Optional[str] = None,
     tools: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:

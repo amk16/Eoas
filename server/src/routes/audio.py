@@ -10,7 +10,7 @@ router = APIRouter()
 @router.post('/transcribe')
 async def transcribe(
     audio: UploadFile = File(...),
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Transcribe audio endpoint."""
     try:

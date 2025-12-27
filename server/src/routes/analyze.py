@@ -92,7 +92,7 @@ def _get_combat_context(db: Any, session_id: int) -> Dict[str, Any]:
 @router.post('/analyze')
 async def analyze(
     request: AnalyzeRequest,
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Analyze transcript for damage/healing events."""
     logger.info("=" * 60)

@@ -4,8 +4,8 @@ export type User = {
 };
 
 export type Campaign = {
-  id: number;
-  user_id: number;
+  id: string;
+  user_id: string;
   name: string;
   description: string | null;
   created_at: string;
@@ -13,9 +13,9 @@ export type Campaign = {
 };
 
 export type Character = {
-  id: number;
-  user_id: number;
-  campaign_id: number | null;
+  id: string;
+  user_id: string;
+  campaign_id: string | null;
   name: string;
   max_hp: number;
   race: string | null;
@@ -34,9 +34,9 @@ export type Character = {
 };
 
 export type Session = {
-  id: number;
-  user_id: number;
-  campaign_id: number | null;
+  id: string;
+  user_id: string;
+  campaign_id: string | null;
   name: string;
   started_at: string;
   ended_at: string | null;
