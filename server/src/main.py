@@ -6,7 +6,6 @@ import os
 import sys
 import logging
 from pathlib import Path
-from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 
 
 
@@ -58,7 +57,6 @@ logger.info(f"CORS allowed origins: {allowed_origins}")
 
 
 
-app.add_middleware(HTTPSRedirectMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
