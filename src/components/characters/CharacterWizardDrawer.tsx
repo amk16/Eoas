@@ -11,7 +11,7 @@ type CharacterDraft = {
   name: string;
   max_hp: number;
   // optional links
-  campaign_id: number | null;
+  campaign_id: string | null;
   // optional combat + flavor
   race: string;
   class_name: string;
@@ -64,7 +64,7 @@ export default function CharacterWizardDrawer({
   open: boolean;
   mode: Mode;
   characterId?: number | null;
-  presetCampaignId?: number | null;
+  presetCampaignId?: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -255,7 +255,7 @@ export default function CharacterWizardDrawer({
                   <select
                     value={draft.campaign_id ?? ''}
                     onChange={(e) =>
-                      setDraft((d) => ({ ...d, campaign_id: parseIntOrNull(e.target.value) }))
+                      setDraft((d) => ({ ...d, campaign_id: e.target.value || null }))
                     }
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
                   >

@@ -30,7 +30,6 @@ export default function SectionShell({
       { to: '/campaigns', label: 'Campaigns', description: 'Worlds' },
       { to: '/characters', label: 'Characters', description: 'Heroes' },
       { to: '/sessions', label: 'Sessions', description: 'Adventures' },
-      { to: '/scribe', label: 'Live Scribe', description: 'Voice AI' },
       { to: '/voice-assistant', label: 'Voice Assistant', description: 'AI Helper' },
     ],
     []

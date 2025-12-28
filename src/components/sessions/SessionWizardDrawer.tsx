@@ -7,8 +7,8 @@ import Stepper, { type StepperStep } from '../ui/Stepper';
 
 type SessionDraft = {
   name: string;
-  campaign_id: number | null;
-  character_ids: number[];
+  campaign_id: string | null;
+  character_ids: string[];
 };
 
 const steps: StepperStep[] = [
@@ -29,7 +29,7 @@ export default function SessionWizardDrawer({
   onClose,
 }: {
   open: boolean;
-  presetCampaignId?: number | null;
+  presetCampaignId?: string | null;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -190,7 +190,7 @@ export default function SessionWizardDrawer({
                   <label className="block text-sm font-medium text-white/80 mb-2">Campaign (Optional)</label>
                   <select
                     value={draft.campaign_id ?? ''}
-                    onChange={(e) => setDraft((d) => ({ ...d, campaign_id: parseIntOrNull(e.target.value) }))}
+                    onChange={(e) => setDraft((d) => ({ ...d, campaign_id: e.target.value || null }))}
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
                   >
                     <option value="">No Campaign</option>

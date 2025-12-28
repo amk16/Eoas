@@ -7,6 +7,7 @@ from ..middleware.auth import authenticate_token
 from ..db.database import get_database
 from ..db.firebase import get_firestore
 from firebase_admin import firestore
+from ..services.nano_banana_service import generate_campaign_image
 
 logger = logging.getLogger(__name__)
 
@@ -305,5 +306,115 @@ async def delete_campaign(campaign_id: str, request: Request, user_id: str = Dep
         raise
     except Exception as e:
         print(f'Error deleting campaign: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.post('/{campaign_id}/generate-art')
+async def generate_campaign_art(
+    campaign_id: str,
+    request: Request,
+    user_id: str = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """
+    Generate campaign banner art for a campaign using nano banana.
+    Updates the campaign with the generated art URL and prompt.
+    """
+    try:
+        # Log request protocol information
+        scheme = request.url.scheme
+        forwarded_proto = request.headers.get('X-Forwarded-Proto', 'not-set')
+        logger.info(f'[Campaigns API] POST /campaigns/{campaign_id}/generate-art - Request protocol info: scheme={scheme}, X-Forwarded-Proto={forwarded_proto}')
+        
+        db = get_firestore()
+        if not db:
+            logger.error('[CAMPAIGNS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        # Access nested collection: users/{user_id}/campaigns/{campaign_id}
+        campaign_ref = db.collection('users').document(user_id).collection('campaigns').document(str(campaign_id))
+        campaign_doc = campaign_ref.get()
+        
+        if not campaign_doc.exists:
+            raise HTTPException(status_code=404, detail='Campaign not found')
+        
+        campaign_data = campaign_doc.to_dict()
+        campaign_data['id'] = campaign_id
+        
+        # Get characters for this campaign for context in prompt generation
+        characters_docs = db.collection('users').document(user_id).collection('characters').where('campaign_id', '==', campaign_id).stream()
+        characters = []
+        for doc in characters_docs:
+            char_data = doc.to_dict()
+            char_data['id'] = doc.id
+            # Convert Firestore timestamps to strings
+            if 'created_at' in char_data and hasattr(char_data['created_at'], 'isoformat'):
+                char_data['created_at'] = char_data['created_at'].isoformat()
+            if 'updated_at' in char_data and hasattr(char_data['updated_at'], 'isoformat'):
+                char_data['updated_at'] = char_data['updated_at'].isoformat()
+            characters.append(char_data)
+        
+        # Get sessions for this campaign for context in prompt generation
+        sessions_docs = db.collection('users').document(user_id).collection('sessions').where('campaign_id', '==', campaign_id).stream()
+        sessions = []
+        for doc in sessions_docs:
+            session_data = doc.to_dict()
+            session_data['id'] = doc.id
+            # Convert Firestore timestamps to strings
+            if 'started_at' in session_data and hasattr(session_data['started_at'], 'isoformat'):
+                session_data['started_at'] = session_data['started_at'].isoformat()
+            if 'ended_at' in session_data and hasattr(session_data['ended_at'], 'isoformat'):
+                session_data['ended_at'] = session_data['ended_at'].isoformat()
+            sessions.append(session_data)
+        
+        # Add characters and sessions to campaign data for prompt generation
+        campaign_data['characters'] = characters
+        campaign_data['sessions'] = sessions
+        
+        # Convert Firestore timestamps to strings for prompt generation
+        if 'created_at' in campaign_data and hasattr(campaign_data['created_at'], 'isoformat'):
+            campaign_data['created_at'] = campaign_data['created_at'].isoformat()
+        if 'updated_at' in campaign_data and hasattr(campaign_data['updated_at'], 'isoformat'):
+            campaign_data['updated_at'] = campaign_data['updated_at'].isoformat()
+        
+        # Generate art using nano banana service
+        try:
+            logger.info(f'[CAMPAIGNS] Generating banner art for campaign: {campaign_data.get("name", "Unknown")}')
+            art_result = await generate_campaign_image(campaign_data)
+            
+            # Update campaign with generated art URL and prompt
+            campaign_ref.update({
+                'display_art_url': art_result['image_url'],
+                'art_prompt': art_result['prompt'],
+                'updated_at': firestore.SERVER_TIMESTAMP,
+            })
+            
+            logger.info(f'[CAMPAIGNS] Successfully generated and saved banner art for campaign: {campaign_data.get("name", "Unknown")}')
+            
+            # Fetch updated campaign
+            updated_doc = campaign_ref.get()
+            result = updated_doc.to_dict()
+            result['id'] = campaign_id
+            
+            # Convert Firestore timestamps to strings
+            if 'created_at' in result and hasattr(result['created_at'], 'isoformat'):
+                result['created_at'] = result['created_at'].isoformat()
+            if 'updated_at' in result and hasattr(result['updated_at'], 'isoformat'):
+                result['updated_at'] = result['updated_at'].isoformat()
+            
+            # Log response being sent
+            logger.info(f'[Campaigns API] POST /campaigns/{campaign_id}/generate-art - Sending response, protocol={scheme}, forwarded_proto={forwarded_proto}')
+            return result
+        except Exception as e:
+            logger.error(f'[CAMPAIGNS] Error generating campaign banner art: {e}')
+            print(f'Error generating campaign art: {e}')
+            raise HTTPException(
+                status_code=500,
+                detail=f'Failed to generate campaign banner art: {str(e)}'
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'[CAMPAIGNS] Error in generate_campaign_art endpoint: {e}')
+        print(f'Error in generate_campaign_art endpoint: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 

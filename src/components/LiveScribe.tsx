@@ -68,6 +68,7 @@ export default function LiveScribe({
   const tokenRef = useRef<string | null>(null);
   const sessionReadyRef = useRef<boolean>(false); // Track if session is ready to receive audio
   const isIntentionallyStoppedRef = useRef<boolean>(false); // Track if user intentionally stopped
+  const wsOpenTimeRef = useRef<number | null>(null); // Track when WebSocket opened to prevent premature cleanup
 
   // Note: SDK integration (@elevenlabs/react) can be added here if needed
   // Current implementation uses WebSocket for direct control and reliability
@@ -78,6 +79,7 @@ export default function LiveScribe({
     
     // Reset session ready flag
     sessionReadyRef.current = false;
+    wsOpenTimeRef.current = null;
     
     // Cleanup WebSocket
     if (wsRef.current) {
@@ -375,9 +377,12 @@ export default function LiveScribe({
       source.connect(workletNode);
 
       ws.onopen = () => {
+        wsOpenTimeRef.current = Date.now();
         log('WebSocket opened successfully');
         setStatus('connected');
         setError('');
+        // Note: ElevenLabs Realtime API should automatically send session_started message
+        // No configuration message needed - the connection URL includes model_id and audio_format
       };
 
       let messageCount = 0;
@@ -442,36 +447,59 @@ export default function LiveScribe({
       };
 
       ws.onclose = (event) => {
+        const timeSinceOpen = wsOpenTimeRef.current ? Date.now() - wsOpenTimeRef.current : null;
         log('WebSocket closed', {
           code: event.code,
           reason: event.reason,
-          wasClean: event.wasClean
+          wasClean: event.wasClean,
+          timeSinceOpen: timeSinceOpen ? `${timeSinceOpen}ms` : 'unknown'
         });
         
         // Only cleanup if not intentionally stopped (user will call cleanup)
         if (!isIntentionallyStoppedRef.current) {
-          if (event.code !== 1000) {
+          // If WebSocket closed very quickly after opening (less than 500ms), it's likely a connection issue
+          if (timeSinceOpen !== null && timeSinceOpen < 500) {
+            logError('WebSocket closed immediately after opening (possible connection issue)', {
+              code: event.code,
+              timeSinceOpen,
+              wasClean: event.wasClean
+            });
+            if (event.code === 1005) {
+              setError('Connection failed immediately. The token may be invalid or the server rejected the connection. Please try again.');
+            } else if (event.code === 1008) {
+              setError('Token expired or invalid. Please try again.');
+            } else {
+              setError('Connection closed immediately. Please check your network connection and try again.');
+            }
+            setStatus('error');
+            cleanup();
+          } else if (event.code !== 1000) {
             // Not a normal closure - unexpected error
             if (event.code === 1008) {
               // Policy violation - likely expired token
               logError('WebSocket closed: Policy violation (likely expired token)', event);
               setError('Token expired. Please try again.');
+            } else if (event.code === 1005) {
+              logError('WebSocket closed without status code', event);
+              setError('Connection lost unexpectedly. Please try again.');
             } else {
               logError('WebSocket closed unexpectedly', event);
-              setError('Connection closed unexpectedly.');
+              setError(`Connection closed unexpectedly (code: ${event.code}). Please try again.`);
             }
             setStatus('error');
+            cleanup();
           } else {
             // Normal closure but unexpected - might be server-side
             log('WebSocket closed normally (unexpected)');
             setError('Connection closed by server. Please try again.');
             setStatus('error');
+            cleanup();
           }
-          cleanup();
         } else {
           log('WebSocket closed (intentional stop)');
           setStatus('idle');
         }
+        wsOpenTimeRef.current = null;
       };
 
     } catch (err: any) {
@@ -516,9 +544,12 @@ export default function LiveScribe({
       wsRef.current = ws;
 
       ws.onopen = () => {
+        wsOpenTimeRef.current = Date.now();
         log('WebSocket opened successfully (fallback)');
         setStatus('connected');
         setError('');
+        // Note: ElevenLabs Realtime API should automatically send session_started message
+        // No configuration message needed - the connection URL includes model_id and audio_format
       };
 
       let messageCount = 0;
@@ -574,35 +605,58 @@ export default function LiveScribe({
       };
 
       ws.onclose = (event) => {
+        const timeSinceOpen = wsOpenTimeRef.current ? Date.now() - wsOpenTimeRef.current : null;
         log('WebSocket closed (fallback)', {
           code: event.code,
           reason: event.reason,
-          wasClean: event.wasClean
+          wasClean: event.wasClean,
+          timeSinceOpen: timeSinceOpen ? `${timeSinceOpen}ms` : 'unknown'
         });
         
         // Only cleanup if not intentionally stopped (user will call cleanup)
         if (!isIntentionallyStoppedRef.current) {
-          if (event.code !== 1000) {
+          // If WebSocket closed very quickly after opening (less than 500ms), it's likely a connection issue
+          if (timeSinceOpen !== null && timeSinceOpen < 500) {
+            logError('WebSocket closed immediately after opening (possible connection issue, fallback)', {
+              code: event.code,
+              timeSinceOpen,
+              wasClean: event.wasClean
+            });
+            if (event.code === 1005) {
+              setError('Connection failed immediately. The token may be invalid or the server rejected the connection. Please try again.');
+            } else if (event.code === 1008) {
+              setError('Token expired or invalid. Please try again.');
+            } else {
+              setError('Connection closed immediately. Please check your network connection and try again.');
+            }
+            setStatus('error');
+            cleanup();
+          } else if (event.code !== 1000) {
             // Not a normal closure - unexpected error
             if (event.code === 1008) {
               logError('WebSocket closed: Policy violation (fallback)', event);
               setError('Token expired. Please try again.');
+            } else if (event.code === 1005) {
+              logError('WebSocket closed without status code (fallback)', event);
+              setError('Connection lost unexpectedly. Please try again.');
             } else {
               logError('WebSocket closed unexpectedly (fallback)', event);
-              setError('Connection closed unexpectedly.');
+              setError(`Connection closed unexpectedly (code: ${event.code}). Please try again.`);
             }
             setStatus('error');
+            cleanup();
           } else {
             // Normal closure but unexpected - might be server-side
             log('WebSocket closed normally (unexpected, fallback)');
             setError('Connection closed by server. Please try again.');
             setStatus('error');
+            cleanup();
           }
-          cleanup();
         } else {
           log('WebSocket closed (intentional stop, fallback)');
           setStatus('idle');
         }
+        wsOpenTimeRef.current = null;
       };
 
       // Process audio chunks (deprecated ScriptProcessorNode approach)

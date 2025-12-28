@@ -8,6 +8,8 @@ export type Campaign = {
   user_id: string;
   name: string;
   description: string | null;
+  display_art_url: string | null;
+  art_prompt: string | null;
   created_at: string;
   updated_at: string;
 };

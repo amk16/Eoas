@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 import logging
 from ..middleware.auth import authenticate_token
 from ..db.database import get_database
+from ..db.firebase import get_firestore
 from ..services.gemini_service import analyze_transcript
 from ..services.transcript_correction_service import correct_transcript
 from ..services.event_types import get_event_type_by_name
@@ -17,10 +18,10 @@ router = APIRouter()
 
 class AnalyzeRequest(BaseModel):
     transcript: str
-    session_id: int
+    session_id: str
 
 
-def _get_combat_context(db: Any, session_id: int) -> Dict[str, Any]:
+def _get_combat_context(db: Any, session_id: str) -> Dict[str, Any]:
     """
     Fetch combat context for a session.
     
@@ -102,33 +103,43 @@ async def analyze(
     logger.info(f"   Transcript preview: {request.transcript[:100]}...")
     
     try:
-        db = get_database()
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[ANALYZE] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (request.session_id, user_id)
-        ).fetchone()
+        # Verify session belongs to user in Firestore
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(request.session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             logger.warning(f"Session {request.session_id} not found for user {user_id}")
             raise HTTPException(status_code=404, detail='Session not found')
         
         logger.info(f"✓ Session {request.session_id} verified for user {user_id}")
         
-        # Get characters in the session
-        characters_rows = db.execute('''
-            SELECT 
-                c.id,
-                c.name,
-                sc.starting_hp,
-                sc.current_hp
-            FROM session_characters sc
-            JOIN characters c ON sc.character_id = c.id
-            WHERE sc.session_id = ?
-        ''', (request.session_id,)).fetchall()
+        # Get characters in the session from Firestore subcollection
+        session_characters_ref = session_ref.collection('session_characters')
+        session_characters_docs = session_characters_ref.stream()
         
-        characters = [dict(row) for row in characters_rows]
+        characters = []
+        for doc in session_characters_docs:
+            char_data = doc.to_dict()
+            # Get character details from Firestore
+            char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(char_data.get('character_id')))
+            char_doc = char_ref.get()
+            
+            if char_doc.exists:
+                char_details = char_doc.to_dict()
+                characters.append({
+                    'id': char_data.get('character_id'),
+                    'name': char_data.get('character_name') or char_details.get('name', 'Unknown'),
+                    'starting_hp': char_data.get('starting_hp', char_details.get('max_hp', 100)),
+                    'current_hp': char_data.get('current_hp', char_details.get('max_hp', 100))
+                })
+        
+        # Also need SQLite db for combat context and event saving
+        db = get_database()
         
         if not characters:
             logger.warning(f"No characters found in session {request.session_id}")
@@ -156,7 +167,20 @@ async def analyze(
             logger.info("🔍 No marker found in transcript, analyzing full transcript")
         
         # Get combat context for transcript correction and analysis
-        combat_context = _get_combat_context(db, request.session_id)
+        # Note: Combat state is still in SQLite, so we need to try converting session_id to int
+        # If conversion fails, combat context will be empty (combat not active)
+        try:
+            session_id_int = int(request.session_id)
+            combat_context = _get_combat_context(db, session_id_int)
+        except (ValueError, TypeError):
+            # Session ID is a string that can't be converted to int, combat context unavailable
+            logger.warning(f"Session ID {request.session_id} cannot be converted to int for combat context")
+            combat_context = {
+                "current_turn_character_id": None,
+                "current_turn_character_name": None,
+                "active_characters": [],
+                "is_combat_active": False
+            }
         if combat_context['is_combat_active']:
             logger.info(f"⚔️  Combat is active - Current turn: {combat_context['current_turn_character_name'] or 'None'}, Active characters: {len(combat_context['active_characters'])}")
         else:
@@ -271,7 +295,7 @@ async def analyze(
             else:
                 previous_chunk_for_next_analysis = corrected_transcript
         
-        # Save events directly to database instead of returning them to frontend
+        # Save events directly to Firestore instead of returning them to frontend
         saved_events = []
         for i, event in enumerate(events, 1):
             try:
@@ -288,11 +312,13 @@ async def analyze(
                     continue
                 
                 # Save event using the event type's handler
+                # Pass Firestore session reference and user_id
                 saved_event = await event_type.handle_event(
                     event,
-                    request.session_id,
+                    request.session_id,  # Pass string session_id
                     user_id,
-                    db
+                    db_firestore,  # Pass Firestore instead of SQLite
+                    session_ref  # Pass session reference for subcollections
                 )
                 saved_events.append(saved_event)
                 

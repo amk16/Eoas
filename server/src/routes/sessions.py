@@ -25,7 +25,7 @@ class SessionUpdate(BaseModel):
 
 
 class AddCharactersRequest(BaseModel):
-    character_ids: List[int]
+    character_ids: List[str]
 
 
 # ============================================================================
@@ -175,81 +175,81 @@ async def get_session(session_id: str, user_id: str = Depends(authenticate_token
         if 'ended_at' in session and hasattr(session['ended_at'], 'isoformat'):
             session['ended_at'] = session['ended_at'].isoformat()
         
-        # Note: Related data (session_characters, damage_events, etc.) still in SQLite
-        # TODO: These will need to be migrated separately or use Firestore subcollections
-        db = get_database()
-        
-        # Get session characters with character details
-        # NOTE: session_characters table still uses SQLite and integer session_id
-        # This will need to be updated when session_characters is migrated
-        # For now, we'll need to keep session_id as string in Firestore but integer in SQLite
-        # This is a temporary compatibility issue that needs to be resolved
-        try:
-            session_id_int = int(session_id)
-        except (ValueError, TypeError):
-            # If session_id can't be converted to int, related tables won't work
-            session_id_int = None
+        # Get session characters from Firestore subcollection
+        session_characters_ref = session_ref.collection('session_characters')
+        session_characters_docs = session_characters_ref.stream()
         
         session_characters = []
-        if session_id_int is not None:
-            session_characters_rows = db.execute('''
-                SELECT 
-                    sc.*,
-                    c.name as character_name,
-                    c.max_hp
-                FROM session_characters sc
-                JOIN characters c ON sc.character_id = c.id
-                WHERE sc.session_id = ?
-            ''', (session_id_int,)).fetchall()
-            session_characters = [dict(row) for row in session_characters_rows]
+        for doc in session_characters_docs:
+            char_data = doc.to_dict()
+            character_id = char_data.get('character_id')
+            
+            if character_id:
+                # Get full character details from Firestore
+                char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(character_id))
+                char_doc = char_ref.get()
+                
+                if char_doc.exists:
+                    char_details = char_doc.to_dict()
+                    session_characters.append({
+                        'id': doc.id,
+                        'character_id': character_id,
+                        'character_name': char_data.get('character_name') or char_details.get('name', 'Unknown'),
+                        'starting_hp': char_data.get('starting_hp', char_details.get('max_hp', 100)),
+                        'current_hp': char_data.get('current_hp', char_details.get('max_hp', 100)),
+                        'max_hp': char_details.get('max_hp', 100),
+                        # Include additional character details if needed
+                        'race': char_details.get('race'),
+                        'class_name': char_details.get('class_name'),
+                        'level': char_details.get('level'),
+                        'ac': char_details.get('ac'),
+                    })
         
-        # Get damage events for this session (still in SQLite)
-        damage_events = []
-        if session_id_int is not None:
-            damage_events_rows = db.execute('''
-                SELECT 
-                    de.*,
-                    c.name as character_name
-                FROM damage_events de
-                JOIN characters c ON de.character_id = c.id
-                WHERE de.session_id = ?
-                ORDER BY de.timestamp DESC
-            ''', (session_id_int,)).fetchall()
-            damage_events = [dict(row) for row in damage_events_rows]
+        # Get events from Firestore subcollection
+        events_ref = session_ref.collection('events')
+        events_docs = events_ref.stream()
         
-        # Get spell events for this session (still in SQLite)
-        spell_events = []
-        if session_id_int is not None:
-            spell_events_rows = db.execute('''
-                SELECT 
-                    se.id,
-                    se.session_id,
-                    se.character_id,
-                    se.spell_name,
-                    se.spell_level,
-                    se.timestamp,
-                    se.transcript_segment,
-                    c.name as character_name
-                FROM spell_events se
-                JOIN characters c ON se.character_id = c.id
-                WHERE se.session_id = ?
-                ORDER BY se.timestamp DESC
-            ''', (session_id_int,)).fetchall()
-            spell_events = [dict(row) for row in spell_events_rows]
-        
-        # Combine events (damage events and spell events) and sort by timestamp
         all_events = []
-        for event in damage_events:
-            all_events.append({
-                **event,
-                'event_type': 'damage' if event['type'] == 'damage' else 'healing'
-            })
-        for event in spell_events:
-            all_events.append({
-                **event,
-                'event_type': 'spell_cast',
-                'type': 'spell_cast'  # For compatibility
-            })
+        for doc in events_docs:
+            event_data = doc.to_dict()
+            event_data['id'] = doc.id
+            
+            # Convert Firestore timestamp to string
+            if 'timestamp' in event_data and hasattr(event_data['timestamp'], 'isoformat'):
+                event_data['timestamp'] = event_data['timestamp'].isoformat()
+            
+            # Map event type to frontend-compatible format
+            event_type = event_data.get('type', 'unknown')
+            
+            # Build event in format expected by frontend
+            formatted_event = {
+                'id': event_data['id'],
+                'session_id': session_id,
+                'character_id': event_data.get('character_id'),
+                'character_name': event_data.get('character_name', 'Unknown'),
+                'type': event_type,  # 'damage', 'healing', 'spell_cast', etc.
+                'event_type': event_type,  # For compatibility
+                'timestamp': event_data.get('timestamp', ''),
+                'transcript_segment': event_data.get('transcript_segment'),
+            }
+            
+            # Add type-specific fields
+            if event_type in ('damage', 'healing'):
+                formatted_event['amount'] = event_data.get('amount')
+            elif event_type == 'spell_cast':
+                formatted_event['spell_name'] = event_data.get('spell_name')
+                formatted_event['spell_level'] = event_data.get('spell_level')
+            elif event_type == 'initiative_roll':
+                formatted_event['initiative_value'] = event_data.get('initiative_value')
+            elif event_type == 'round_start':
+                formatted_event['round_number'] = event_data.get('round_number')
+            elif event_type in ('status_condition_applied', 'status_condition_removed'):
+                formatted_event['condition_name'] = event_data.get('condition_name')
+            elif event_type in ('buff_debuff_applied', 'buff_debuff_removed'):
+                formatted_event['effect_name'] = event_data.get('effect_name')
+                formatted_event['effect_type'] = event_data.get('effect_type')
+            
+            all_events.append(formatted_event)
         
         # Sort all events by timestamp descending
         all_events.sort(key=lambda x: x.get('timestamp', ''), reverse=True)
@@ -387,7 +387,7 @@ async def update_session(
 
 @router.post('/{session_id}/characters')
 async def add_characters_to_session(
-    session_id: int,
+    session_id: str,
     request: AddCharactersRequest,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
@@ -396,56 +396,67 @@ async def add_characters_to_session(
         if not isinstance(request.character_ids, list) or len(request.character_ids) == 0:
             raise HTTPException(status_code=400, detail='character_ids must be a non-empty array')
         
-        db = get_database()
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
         # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
         # Verify all characters belong to user and get their max_hp
-        placeholders = ','.join(['?'] * len(request.character_ids))
-        query = f'SELECT id, max_hp FROM characters WHERE id IN ({placeholders}) AND user_id = ?'
-        params = list(request.character_ids) + [user_id]
-        character_rows = db.execute(query, params).fetchall()
-        
-        characters = [dict(row) for row in character_rows]
-        
-        if len(characters) != len(request.character_ids):
-            raise HTTPException(
-                status_code=400,
-                detail='One or more characters not found or do not belong to you'
-            )
-        
-        # Insert session characters (use max_hp as starting_hp and current_hp)
-        # Use transaction
-        try:
-            for character in characters:
-                db.execute(
-                    'INSERT OR REPLACE INTO session_characters (session_id, character_id, starting_hp, current_hp) VALUES (?, ?, ?, ?)',
-                    (session_id, character['id'], character['max_hp'], character['max_hp'])
+        characters = []
+        for character_id in request.character_ids:
+            char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(character_id))
+            char_doc = char_ref.get()
+            
+            if not char_doc.exists:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f'Character {character_id} not found or does not belong to you'
                 )
-            db.commit()
-        except Exception as e:
-            db.rollback()
-            raise e
+            
+            char_data = char_doc.to_dict()
+            characters.append({
+                'id': character_id,
+                'max_hp': char_data.get('max_hp', 100),
+                'name': char_data.get('name', 'Unknown')
+            })
+        
+        # Store session characters in Firestore subcollection
+        session_characters_ref = session_ref.collection('session_characters')
+        
+        for character in characters:
+            # Check if session_character already exists
+            char_doc_ref = session_characters_ref.document(character['id'])
+            char_doc = char_doc_ref.get()
+            
+            if char_doc.exists:
+                # Update existing
+                char_doc_ref.update({
+                    'starting_hp': character['max_hp'],
+                    'current_hp': character['max_hp'],
+                })
+            else:
+                # Create new
+                char_doc_ref.set({
+                    'character_id': character['id'],
+                    'character_name': character['name'],
+                    'starting_hp': character['max_hp'],
+                    'current_hp': character['max_hp'],
+                })
         
         # Return updated session with characters
-        session_characters_rows = db.execute('''
-            SELECT 
-                sc.*,
-                c.name as character_name,
-                c.max_hp
-            FROM session_characters sc
-            JOIN characters c ON sc.character_id = c.id
-            WHERE sc.session_id = ?
-        ''', (session_id,)).fetchall()
-        
-        session_characters = [dict(row) for row in session_characters_rows]
+        session_characters_docs = session_characters_ref.stream()
+        session_characters = []
+        for doc in session_characters_docs:
+            char_data = doc.to_dict()
+            char_data['id'] = doc.id
+            session_characters.append(char_data)
         
         return {
             'message': 'Characters added to session',
@@ -753,68 +764,128 @@ async def get_initiative_order(
 # Phase 1: Get full combat state
 @router.get('/{session_id}/combat-state')
 async def get_combat_state(
-    session_id: int,
+    session_id: str,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Get full combat state including round, current turn, and initiative order."""
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Get combat state
-        combat_state = db.execute(
-            'SELECT * FROM combat_state WHERE session_id = ?',
-            (session_id,)
-        ).fetchone()
-        
-        if not combat_state:
-            return {
-                'is_active': False,
-                'current_round': 0,
-                'current_turn_character_id': None,
-                'initiative_order': []
-            }
-        
-        # Get initiative order with character names
-        initiative_rows = db.execute('''
-            SELECT 
-                io.character_id,
-                io.initiative_value,
-                io.turn_order,
-                c.name as character_name
-            FROM initiative_order io
-            JOIN characters c ON io.character_id = c.id
-            WHERE io.session_id = ?
-            ORDER BY io.turn_order ASC
-        ''', (session_id,)).fetchall()
-        
-        initiative_list = [dict(row) for row in initiative_rows]
-        
-        # Get current turn character name
-        current_turn_char_name = None
-        if combat_state['current_turn_character_id']:
-            char = db.execute(
-                'SELECT name FROM characters WHERE id = ?',
-                (combat_state['current_turn_character_id'],)
+        # Combat state is still in SQLite, so we need to convert session_id to int
+        # If conversion fails, return empty combat state (combat not active)
+        # This is expected for Firestore sessions until combat state is migrated
+        try:
+            session_id_int = int(session_id)
+            # Legacy SQLite path (only reached if session_id_int was successfully converted)
+            db = get_database()
+            
+            # Get combat state from SQLite
+            combat_state = db.execute(
+                'SELECT * FROM combat_state WHERE session_id = ?',
+                (session_id_int,)
             ).fetchone()
-            if char:
-                current_turn_char_name = char['name']
-        
-        return {
-            'is_active': bool(combat_state['is_active']),
-            'current_round': combat_state['current_round'],
-            'current_turn_character_id': combat_state['current_turn_character_id'],
-            'current_turn_character_name': current_turn_char_name,
-            'initiative_order': initiative_list
-        }
+            
+            if combat_state:
+                # Get initiative order with character names from SQLite
+                initiative_rows = db.execute('''
+                    SELECT 
+                        io.character_id,
+                        io.initiative_value,
+                        io.turn_order,
+                        c.name as character_name
+                    FROM initiative_order io
+                    JOIN characters c ON io.character_id = c.id
+                    WHERE io.session_id = ?
+                    ORDER BY io.turn_order ASC
+                ''', (session_id_int,)).fetchall()
+                
+                initiative_list = [dict(row) for row in initiative_rows]
+                
+                # Get current turn character name
+                current_turn_char_name = None
+                if combat_state['current_turn_character_id']:
+                    char = db.execute(
+                        'SELECT name FROM characters WHERE id = ?',
+                        (combat_state['current_turn_character_id'],)
+                    ).fetchone()
+                    if char:
+                        current_turn_char_name = char['name']
+                
+                return {
+                    'is_active': bool(combat_state['is_active']),
+                    'current_round': combat_state['current_round'],
+                    'current_turn_character_id': combat_state['current_turn_character_id'],
+                    'current_turn_character_name': current_turn_char_name,
+                    'initiative_order': initiative_list
+                }
+        except (ValueError, TypeError):
+            # Session ID is a Firestore string - read combat state from Firestore
+            combat_state_ref = session_ref.collection('combat_state').document('current')
+            combat_state_doc = combat_state_ref.get()
+            
+            if not combat_state_doc.exists:
+                # No combat state exists
+                return {
+                    'is_active': False,
+                    'current_round': 1,
+                    'current_turn_character_id': None,
+                    'current_turn_character_name': None,
+                    'initiative_order': []
+                }
+            
+            combat_state_data = combat_state_doc.to_dict()
+            
+            # Get initiative order from Firestore
+            initiative_order_ref = session_ref.collection('initiative_order')
+            all_orders = list(initiative_order_ref.stream())
+            
+            initiative_list = []
+            for doc in all_orders:
+                data = doc.to_dict()
+                initiative_list.append({
+                    'character_id': data.get('character_id'),
+                    'character_name': data.get('character_name', 'Unknown'),
+                    'initiative_value': data.get('initiative_value', 0),
+                    'turn_order': data.get('turn_order', 0)
+                })
+            
+            # Sort by turn_order
+            initiative_list.sort(key=lambda x: x.get('turn_order', 0))
+            
+            # Get current turn character name
+            current_turn_char_name = None
+            current_turn_char_id = combat_state_data.get('current_turn_character_id')
+            if current_turn_char_id:
+                for char in initiative_list:
+                    if str(char.get('character_id')) == str(current_turn_char_id):
+                        current_turn_char_name = char.get('character_name')
+                        break
+                
+                # If not found in initiative list, try to fetch from characters collection
+                if not current_turn_char_name:
+                    char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(current_turn_char_id))
+                    char_doc = char_ref.get()
+                    if char_doc.exists:
+                        char_data = char_doc.to_dict()
+                        current_turn_char_name = char_data.get('name', 'Unknown')
+            
+            return {
+                'is_active': combat_state_data.get('is_active', False),
+                'current_round': combat_state_data.get('current_round', 1),
+                'current_turn_character_id': current_turn_char_id,
+                'current_turn_character_name': current_turn_char_name,
+                'initiative_order': initiative_list
+            }
         
     except HTTPException:
         raise
@@ -826,87 +897,166 @@ async def get_combat_state(
 # Phase 1: Manually advance turn
 @router.post('/{session_id}/initiative/advance')
 async def advance_turn(
-    session_id: int,
+    session_id: str,
     request: InitiativeAdvanceRequest,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Manually advance to the next turn in initiative order."""
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Get combat state
-        combat_state = db.execute(
-            'SELECT * FROM combat_state WHERE session_id = ?',
-            (session_id,)
-        ).fetchone()
+        # Combat state is still in SQLite, so we need to convert session_id to int
+        # Update combat state in Firestore
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(session_id)
+        combat_state_ref = session_ref.collection('combat_state').document('current')
+        combat_state_doc = combat_state_ref.get()
         
-        if not combat_state or not combat_state['is_active']:
+        if not combat_state_doc.exists:
+            raise HTTPException(
+                status_code=400,
+                detail='Combat not started. Roll initiative first.'
+            )
+        
+        combat_state_data = combat_state_doc.to_dict()
+        if not combat_state_data.get('is_active', False):
             raise HTTPException(
                 status_code=400,
                 detail='Combat not active. Roll initiative first.'
             )
         
-        # Get current turn character
-        current_char_id = combat_state['current_turn_character_id']
+        current_char_id = combat_state_data.get('current_turn_character_id')
         if not current_char_id:
             raise HTTPException(
                 status_code=400,
                 detail='No current turn set. Roll initiative first.'
             )
         
-        # Get current turn order
-        current_turn = db.execute(
-            'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
-            (session_id, current_char_id)
-        ).fetchone()
+        # Get initiative order from Firestore
+        initiative_order_ref = session_ref.collection('initiative_order')
+        all_orders = list(initiative_order_ref.stream())
         
-        if not current_turn:
+        # Find current character's turn order
+        current_turn_order = None
+        for doc in all_orders:
+            data = doc.to_dict()
+            if str(data.get('character_id')) == str(current_char_id):
+                current_turn_order = data.get('turn_order')
+                break
+        
+        if current_turn_order is None:
             raise HTTPException(
                 status_code=400,
                 detail='Current character not in initiative order'
             )
         
-        # Get next character in order
-        next_char = db.execute(
-            '''SELECT character_id FROM initiative_order 
-               WHERE session_id = ? AND turn_order > ?
-               ORDER BY turn_order ASC LIMIT 1''',
-            (session_id, current_turn['turn_order'])
-        ).fetchone()
+        # Find next character in order
+        next_char_id = None
+        next_char_turn_order = None
+        for doc in all_orders:
+            data = doc.to_dict()
+            turn_order = data.get('turn_order', 0)
+            if turn_order > current_turn_order:
+                if next_char_turn_order is None or turn_order < next_char_turn_order:
+                    next_char_id = data.get('character_id')
+                    next_char_turn_order = turn_order
         
-        if next_char:
+        if next_char_id:
             # Move to next character
-            db.execute(
-                'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
-                (next_char['character_id'], session_id)
-            )
+            combat_state_ref.update({
+                'current_turn_character_id': next_char_id,
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
         else:
             # Wrap around to first character and increment round
-            first_char = db.execute(
-                '''SELECT character_id FROM initiative_order 
-                   WHERE session_id = ? 
-                   ORDER BY turn_order ASC LIMIT 1''',
-                (session_id,)
+            first_char_id = None
+            first_turn_order = None
+            for doc in all_orders:
+                data = doc.to_dict()
+                turn_order = data.get('turn_order', 0)
+                if first_turn_order is None or turn_order < first_turn_order:
+                    first_char_id = data.get('character_id')
+                    first_turn_order = turn_order
+            
+            if first_char_id:
+                current_round = combat_state_data.get('current_round', 1)
+                combat_state_ref.update({
+                    'current_turn_character_id': first_char_id,
+                    'current_round': current_round + 1,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
+        
+        # Also try to update SQLite for legacy compatibility (if session_id can be converted)
+        try:
+            session_id_int = int(session_id)
+            db = get_database()
+            
+            # Get combat state from SQLite
+            combat_state = db.execute(
+                'SELECT * FROM combat_state WHERE session_id = ?',
+                (session_id_int,)
             ).fetchone()
             
-            if first_char:
+            if not combat_state or not combat_state['is_active']:
+                # Return updated combat state from Firestore
+                return await get_combat_state(session_id, user_id)
+            
+            # Get current turn character
+            current_char_id_int = combat_state['current_turn_character_id']
+            if not current_char_id_int:
+                return await get_combat_state(session_id, user_id)
+            
+            # Get current turn order
+            current_turn = db.execute(
+                'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
+                (session_id_int, current_char_id_int)
+            ).fetchone()
+            
+            if not current_turn:
+                return await get_combat_state(session_id, user_id)
+            
+            # Get next character in order
+            next_char = db.execute(
+                '''SELECT character_id FROM initiative_order 
+                   WHERE session_id = ? AND turn_order > ?
+                   ORDER BY turn_order ASC LIMIT 1''',
+                (session_id_int, current_turn['turn_order'])
+            ).fetchone()
+            
+            if next_char:
                 db.execute(
-                    '''UPDATE combat_state 
-                       SET current_turn_character_id = ?, current_round = current_round + 1 
-                       WHERE session_id = ?''',
-                    (first_char['character_id'], session_id)
+                    'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
+                    (next_char['character_id'], session_id_int)
                 )
-        
-        db.commit()
+            else:
+                first_char = db.execute(
+                    '''SELECT character_id FROM initiative_order 
+                       WHERE session_id = ? 
+                       ORDER BY turn_order ASC LIMIT 1''',
+                    (session_id_int,)
+                ).fetchone()
+                
+                if first_char:
+                    db.execute(
+                        '''UPDATE combat_state 
+                           SET current_turn_character_id = ?, current_round = current_round + 1 
+                           WHERE session_id = ?''',
+                        (first_char['character_id'], session_id_int)
+                    )
+            
+            db.commit()
+        except (ValueError, TypeError):
+            # Can't convert to int, skip SQLite update (Firestore is the source of truth)
+            pass
         
         # Return updated combat state
         return await get_combat_state(session_id, user_id)
@@ -1538,180 +1688,225 @@ async def reset_character_spell_slots(
 
 @router.get('/{session_id}/transcripts')
 async def get_session_transcripts(
-    session_id: int,
+    session_id: str,
     limit: int = Query(200, ge=1, le=1000),
     after_id: Optional[int] = Query(None, ge=0),
     user_id: str = Depends(authenticate_token)
 ) -> List[Dict[str, Any]]:
-    """Get persisted transcript segments for a session."""
+    """Get persisted transcript segments for a session from Firestore."""
     try:
-        db = get_database()
-
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        if not session:
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
-
-        if after_id is None:
-            rows = db.execute(
-                '''
-                SELECT *
-                FROM session_transcripts
-                WHERE session_id = ?
-                ORDER BY id ASC
-                LIMIT ?
-                ''',
-                (session_id, limit)
-            ).fetchall()
-        else:
-            rows = db.execute(
-                '''
-                SELECT *
-                FROM session_transcripts
-                WHERE session_id = ? AND id > ?
-                ORDER BY id ASC
-                LIMIT ?
-                ''',
-                (session_id, after_id, limit)
-            ).fetchall()
-
-        return [dict(r) for r in rows]
+        
+        # Get transcripts from Firestore subcollection
+        transcripts_ref = session_ref.collection('transcripts')
+        
+        # Query transcripts - try to order by created_at, but if index doesn't exist, order by document ID
+        # Firestore requires an index for order_by on timestamp fields
+        try:
+            query = transcripts_ref.order_by('created_at', direction=firestore.Query.ASCENDING).limit(limit)
+            docs = query.stream()
+        except Exception as e:
+            # If index doesn't exist, fall back to ordering by document ID
+            logger.warning(f"Could not order by created_at (index may not exist): {e}. Ordering by document ID instead.")
+            query = transcripts_ref.limit(limit)
+            docs = query.stream()
+        
+        transcripts = []
+        for doc in docs:
+            transcript_data = doc.to_dict()
+            transcript_data['id'] = doc.id
+            
+            # Convert Firestore timestamp to string
+            if 'created_at' in transcript_data and hasattr(transcript_data['created_at'], 'isoformat'):
+                transcript_data['created_at'] = transcript_data['created_at'].isoformat()
+            
+            transcripts.append(transcript_data)
+        
+        # Sort by created_at if available (client-side fallback)
+        transcripts.sort(key=lambda x: x.get('created_at', ''))
+        
+        return transcripts
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching session transcripts: {e}')
+        logger.error(f'Error fetching session transcripts: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
 @router.post('/{session_id}/transcripts')
 async def create_session_transcript_segment(
-    session_id: int,
+    session_id: str,
     segment: TranscriptSegmentCreate,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
-    """Create (or de-dupe) a persisted transcript segment for a session."""
+    """Create (or de-dupe) a persisted transcript segment for a session in Firestore."""
     try:
         if not segment.client_chunk_id or not segment.text:
             raise HTTPException(status_code=400, detail='client_chunk_id and text are required')
 
-        db = get_database()
-
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        if not session:
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
-
-        # Insert with de-dupe (unique(session_id, client_chunk_id))
-        db.execute(
-            '''
-            INSERT OR IGNORE INTO session_transcripts
-              (session_id, client_chunk_id, client_timestamp_ms, text, speaker)
-            VALUES (?, ?, ?, ?, ?)
-            ''',
-            (session_id, segment.client_chunk_id, segment.client_timestamp_ms, segment.text, segment.speaker)
-        )
-        db.commit()
-
-        row = db.execute(
-            '''
-            SELECT *
-            FROM session_transcripts
-            WHERE session_id = ? AND client_chunk_id = ?
-            ''',
-            (session_id, segment.client_chunk_id)
-        ).fetchone()
-
-        if not row:
+        
+        # Store transcripts in Firestore subcollection
+        transcripts_ref = session_ref.collection('transcripts')
+        
+        # Check if transcript with this client_chunk_id already exists (de-dupe)
+        existing_docs = transcripts_ref.where('client_chunk_id', '==', segment.client_chunk_id).limit(1).stream()
+        existing_doc = None
+        for doc in existing_docs:
+            existing_doc = doc
+            break
+        
+        if existing_doc:
+            # Return existing transcript
+            result = existing_doc.to_dict()
+            result['id'] = existing_doc.id
+            # Convert Firestore timestamp to string if present
+            if 'created_at' in result and hasattr(result['created_at'], 'isoformat'):
+                result['created_at'] = result['created_at'].isoformat()
+            return result
+        
+        # Create new transcript document
+        from firebase_admin import firestore
+        transcript_data = {
+            'client_chunk_id': segment.client_chunk_id,
+            'client_timestamp_ms': segment.client_timestamp_ms,
+            'text': segment.text,
+            'speaker': segment.speaker,
+            'created_at': firestore.SERVER_TIMESTAMP,
+        }
+        
+        doc_ref = transcripts_ref.document()
+        doc_ref.set(transcript_data)
+        
+        # Get the created document
+        doc = doc_ref.get()
+        if not doc.exists:
             raise HTTPException(status_code=500, detail='Failed to create transcript segment')
-
-        return dict(row)
+        
+        result = doc.to_dict()
+        result['id'] = doc.id
+        
+        # Convert Firestore timestamp to string
+        if 'created_at' in result and hasattr(result['created_at'], 'isoformat'):
+            result['created_at'] = result['created_at'].isoformat()
+        
+        return result
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating session transcript segment: {e}')
+        logger.error(f'Error creating session transcript segment: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
 @router.put('/{session_id}/transcripts/{transcript_id}')
 async def update_session_transcript_segment(
-    session_id: int,
-    transcript_id: int,
+    session_id: str,
+    transcript_id: str,
     update: TranscriptSegmentUpdate,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
-    """Update a transcript segment (speaker and/or text) for a session."""
+    """Update a transcript segment (speaker and/or text) for a session in Firestore."""
     try:
-        db = get_database()
-
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        if not session:
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
-
-        existing = db.execute(
-            'SELECT * FROM session_transcripts WHERE id = ? AND session_id = ?',
-            (transcript_id, session_id)
-        ).fetchone()
-        if not existing:
+        
+        # Get transcript from Firestore subcollection
+        transcript_ref = session_ref.collection('transcripts').document(str(transcript_id))
+        transcript_doc = transcript_ref.get()
+        
+        if not transcript_doc.exists:
             raise HTTPException(status_code=404, detail='Transcript segment not found')
 
-        updates = []
-        values = []
-
+        # Build update data
+        update_data = {}
         if update.text is not None:
-            updates.append('text = ?')
-            values.append(update.text)
+            update_data['text'] = update.text
         if update.speaker is not None:
-            updates.append('speaker = ?')
-            values.append(update.speaker)
+            update_data['speaker'] = update.speaker
 
-        if not updates:
+        if not update_data:
             raise HTTPException(status_code=400, detail='No fields to update')
 
-        values.extend([transcript_id, session_id])
-        query = f'UPDATE session_transcripts SET {", ".join(updates)} WHERE id = ? AND session_id = ?'
-        db.execute(query, values)
-        db.commit()
-
-        row = db.execute(
-            'SELECT * FROM session_transcripts WHERE id = ? AND session_id = ?',
-            (transcript_id, session_id)
-        ).fetchone()
-        return dict(row)
+        # Update the document
+        transcript_ref.update(update_data)
+        
+        # Get the updated document
+        updated_doc = transcript_ref.get()
+        result = updated_doc.to_dict()
+        result['id'] = updated_doc.id
+        
+        # Convert Firestore timestamp to string
+        if 'created_at' in result and hasattr(result['created_at'], 'isoformat'):
+            result['created_at'] = result['created_at'].isoformat()
+        
+        return result
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error updating session transcript segment: {e}')
+        logger.error(f'Error updating session transcript segment: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
 @router.delete('/{session_id}/transcripts')
 async def clear_session_transcripts(
-    session_id: int,
+    session_id: str,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Delete all persisted transcript segments for a session."""
     try:
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Transcripts are still in SQLite, so convert session_id to int
+        try:
+            session_id_int = int(session_id)
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail=f'Session ID {session_id} cannot be used with transcript system (must be numeric)'
+            )
+        
         db = get_database()
 
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT id FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-
-        db.execute('DELETE FROM session_transcripts WHERE session_id = ?', (session_id,))
+        db.execute('DELETE FROM session_transcripts WHERE session_id = ?', (session_id_int,))
         db.commit()
         return {'message': 'Transcripts cleared'}
     except HTTPException:

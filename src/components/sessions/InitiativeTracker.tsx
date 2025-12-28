@@ -5,7 +5,7 @@ import Stepper, { type StepperStep } from '../ui/Stepper';
 type ViewMode = 'list' | 'stepper';
 
 interface InitiativeCharacter {
-  character_id: number;
+  character_id: string | number;  // Can be string (Firestore) or number (legacy SQLite)
   character_name: string;
   initiative_value: number;
   turn_order: number;
@@ -14,13 +14,13 @@ interface InitiativeCharacter {
 interface CombatState {
   is_active: boolean;
   current_round: number;
-  current_turn_character_id: number | null;
+  current_turn_character_id: string | number | null;  // Can be string (Firestore) or number (legacy SQLite)
   current_turn_character_name: string | null;
   initiative_order: InitiativeCharacter[];
 }
 
 interface InitiativeTrackerProps {
-  sessionId: number;
+  sessionId: string | number;
   onUpdate?: () => void;
 }
 

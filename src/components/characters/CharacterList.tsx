@@ -23,8 +23,7 @@ export default function CharacterList() {
   }, [drawerMode, searchParams]);
   const presetCampaignId = useMemo(() => {
     const raw = searchParams.get('campaignId');
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : null;
+    return raw || null;
   }, [searchParams]);
 
   const selectedCharacter = useMemo(() => {

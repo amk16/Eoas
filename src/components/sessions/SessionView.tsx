@@ -16,16 +16,19 @@ interface SessionCharacter {
 }
 
 interface DamageEvent {
-  id: number;
-  session_id: number;
-  character_id: number;
-  character_name: string;
+  id: string | number;  // Can be string (Firestore) or number (legacy SQLite)
+  session_id: string | number;
+  character_id?: string | number;
+  character_name?: string;
   amount?: number;
-  type: 'damage' | 'healing' | 'spell_cast';
+  type: 'damage' | 'healing' | 'spell_cast' | 'initiative_roll' | 'turn_advance' | 'round_start' | 'status_condition_applied' | 'status_condition_removed' | 'combat_end' | 'buff_debuff_applied' | 'buff_debuff_removed';
   spell_name?: string;
   spell_level?: number;
+  initiative_value?: number;
+  round_number?: number;
+  condition_name?: string;
   timestamp: string;
-  transcript_segment: string | null;
+  transcript_segment?: string | null;
 }
 
 interface TranscriptSegment {
@@ -239,7 +242,7 @@ export default function SessionView() {
       ...prev,
       {
         id: -1,
-        session_id: parseInt(id),
+        session_id: id as any, // Session ID is now a string, but TranscriptSegment interface still expects number
         client_chunk_id,
         client_timestamp_ms,
         text,
@@ -370,8 +373,7 @@ export default function SessionView() {
     console.log(`📄 Full context: "${transcriptToAnalyze}"`);
     
     // Trigger analysis (don't await to avoid blocking, but handle errors)
-    // Pass currentChunk as fallback in case backend doesn't return previous_chunk_for_next_analysis
-    analyzeBufferedTranscript(transcriptToAnalyze, currentChunk).catch(err => {
+    analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
       console.error('Error in buffered transcript analysis:', err);
     });
   };
@@ -379,7 +381,7 @@ export default function SessionView() {
   /**
    * Analyze the buffered transcript and process events
    */
-  const analyzeBufferedTranscript = async (transcriptToAnalyze: string, fallbackChunk?: string) => {
+  const analyzeBufferedTranscript = async (transcriptToAnalyze: string) => {
     if (!session || !id) return;
 
     // Only analyze if transcript has meaningful content
@@ -392,7 +394,7 @@ export default function SessionView() {
       setAnalyzing(true);
       console.log(`🔍 Analyzing transcript:`, transcriptToAnalyze);
       
-      const result = await analyzeTranscript(transcriptToAnalyze, parseInt(id));
+      const result = await analyzeTranscript(transcriptToAnalyze, id);
       
       console.log('✅ Analysis complete:', result);
 
@@ -405,12 +407,8 @@ export default function SessionView() {
         } else {
           console.log(`📦 Stored empty previous_chunk_for_next_analysis (last event was at end of transcript)`);
         }
-      } else if (fallbackChunk) {
-        // Fallback: use current chunk if backend doesn't return previous_chunk_for_next_analysis
-        previousChunkRef.current = fallbackChunk;
-        console.log(`📦 Stored fallback chunk (${fallbackChunk.length} chars)`);
       } else {
-        // No previous chunk and no fallback - clear it
+        // No previous chunk from backend - clear it
         previousChunkRef.current = '';
         console.log(`📦 Cleared previous chunk (no data from backend)`);
       }
@@ -715,7 +713,7 @@ export default function SessionView() {
       {session.status === 'active' && id && (
         <div className="mb-6">
           <InitiativeTracker 
-            sessionId={parseInt(id)} 
+            sessionId={id} 
             onUpdate={() => fetchSession({ mode: 'refresh' })}
           />
         </div>
@@ -789,7 +787,7 @@ export default function SessionView() {
                   <div className="flex justify-between items-start">
                     <div>
                       <span className="font-medium text-white">
-                        {event.character_name}
+                        {event.character_name || 'Unknown'}
                       </span>
                       {event.type === 'spell_cast' ? (
                         <span className="ml-2 font-semibold text-purple-200">
@@ -798,7 +796,7 @@ export default function SessionView() {
                             <span className="text-purple-300"> (level {event.spell_level})</span>
                           )}
                         </span>
-                      ) : (
+                      ) : event.type === 'damage' || event.type === 'healing' ? (
                         <span
                           className={`ml-2 font-semibold ${
                             event.type === 'damage' ? 'text-red-200' : 'text-emerald-200'
@@ -806,6 +804,34 @@ export default function SessionView() {
                         >
                           {event.type === 'damage' ? '-' : '+'}
                           {event.amount} HP
+                        </span>
+                      ) : event.type === 'initiative_roll' ? (
+                        <span className="ml-2 font-semibold text-blue-200">
+                          rolled initiative: {event.initiative_value}
+                        </span>
+                      ) : event.type === 'turn_advance' ? (
+                        <span className="ml-2 font-semibold text-yellow-200">
+                          turn advanced
+                        </span>
+                      ) : event.type === 'round_start' ? (
+                        <span className="ml-2 font-semibold text-cyan-200">
+                          round {event.round_number || 'started'}
+                        </span>
+                      ) : event.type === 'status_condition_applied' ? (
+                        <span className="ml-2 font-semibold text-orange-200">
+                          {event.condition_name} applied
+                        </span>
+                      ) : event.type === 'status_condition_removed' ? (
+                        <span className="ml-2 font-semibold text-orange-300">
+                          {event.condition_name} removed
+                        </span>
+                      ) : event.type === 'combat_end' ? (
+                        <span className="ml-2 font-semibold text-gray-300">
+                          combat ended
+                        </span>
+                      ) : (
+                        <span className="ml-2 font-semibold text-neutral-300">
+                          {event.type}
                         </span>
                       )}
                     </div>
@@ -828,7 +854,7 @@ export default function SessionView() {
       {/* Phase 2: Character Detail Sidebar */}
       {session.status === 'active' && id && (
         <CharacterDetailSidebar
-          sessionId={parseInt(id)}
+          sessionId={id as any}
           characterId={selectedCharacterId}
           characterName={selectedCharacterName}
           isOpen={isSidebarOpen}

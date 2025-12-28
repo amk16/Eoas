@@ -1,7 +1,7 @@
 import api from './api';
 
 export type AnalyzeEvent = {
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   amount: number;
   type: 'damage' | 'healing';
@@ -22,7 +22,7 @@ export type AnalyzeResponse = {
  */
 export async function analyzeTranscript(
   transcript: string,
-  sessionId: number
+  sessionId: string | number
 ): Promise<AnalyzeResponse> {
   try {
     const response = await api.post<AnalyzeResponse>('/analyze', {
