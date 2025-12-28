@@ -59,6 +59,7 @@ default_origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://localhost:8080",
+    "https://eoasdev-529682581088.europe-west1.run.app",
     "https://eoas-529682581088.europe-west1.run.app"
 ]
 
