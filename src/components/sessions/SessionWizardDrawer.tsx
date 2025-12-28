@@ -17,12 +17,6 @@ const steps: StepperStep[] = [
   { id: 'review', title: 'Review', description: 'Confirm & start' },
 ];
 
-function parseIntOrNull(v: string | null): number | null {
-  if (!v) return null;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
 export default function SessionWizardDrawer({
   open,
   presetCampaignId,
@@ -71,7 +65,7 @@ export default function SessionWizardDrawer({
     return { ok: issues.length === 0, issues };
   }, [draft.name, draft.character_ids.length]);
 
-  const toggleCharacter = (id: number) => {
+  const toggleCharacter = (id: string) => {
     setDraft((d) => ({
       ...d,
       character_ids: d.character_ids.includes(id) ? d.character_ids.filter((x) => x !== id) : [...d.character_ids, id],

@@ -148,7 +148,7 @@ export async function generateCharacterArt(character: Character): Promise<{
  * @param characterId - The ID of the character to generate art for
  * @returns Promise resolving to the updated character with art URL and prompt
  */
-export async function generateAndSaveCharacterArt(characterId: number): Promise<Character> {
+export async function generateAndSaveCharacterArt(characterId: string): Promise<Character> {
   console.log('[imageGenerationService] generateAndSaveCharacterArt called', {
     characterId: characterId,
   });

@@ -47,12 +47,6 @@ const defaultDraft = (preset?: Partial<CharacterDraft>): CharacterDraft => ({
   ...preset,
 });
 
-function parseIntOrNull(v: string | null): number | null {
-  if (!v) return null;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
 export default function CharacterWizardDrawer({
   open,
   mode,
@@ -63,7 +57,7 @@ export default function CharacterWizardDrawer({
 }: {
   open: boolean;
   mode: Mode;
-  characterId?: number | null;
+  characterId?: string | null;
   presetCampaignId?: string | null;
   onClose: () => void;
   onSaved: () => void;

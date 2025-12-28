@@ -13,7 +13,7 @@ export default function CampaignView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [generatingArt, setGeneratingArt] = useState(false);
-  const [selectedCharacterId, setSelectedCharacterId] = useState<number | null>(null);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
 
   const selectedCharacter = useMemo(() => {
     if (!selectedCharacterId) return null;
@@ -83,7 +83,7 @@ export default function CampaignView() {
     return null;
   };
 
-  const handleCharacterCardClick = (characterId: number) => {
+  const handleCharacterCardClick = (characterId: string) => {
     setSelectedCharacterId(characterId);
   };
 
@@ -91,12 +91,12 @@ export default function CampaignView() {
     setSelectedCharacterId(null);
   };
 
-  const handleSidebarEdit = (characterId: number) => {
+  const handleSidebarEdit = (characterId: string) => {
     setSelectedCharacterId(null);
     navigate(`/characters?drawer=edit&id=${characterId}`);
   };
 
-  const handleSidebarDelete = async (characterId: number) => {
+  const handleSidebarDelete = async (characterId: string) => {
     try {
       await api.delete(`/characters/${characterId}`);
       setCharacters(characters.filter((c) => c.id !== characterId));

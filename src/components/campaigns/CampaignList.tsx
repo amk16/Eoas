@@ -86,7 +86,7 @@ export default function CampaignList() {
   };
 
   // Get campaign image URL - use display_art_url if available, otherwise placeholder/gradient
-  const getCampaignImageUrl = (campaign: Campaign, index: number): string => {
+  const getCampaignImageUrl = (campaign: Campaign): string => {
     if (campaign.display_art_url) {
       // If the URL starts with /api, prepend the API base URL
       if (campaign.display_art_url.startsWith('/api/')) {
@@ -95,17 +95,6 @@ export default function CampaignList() {
       }
       return campaign.display_art_url;
     }
-    // Generate gradient placeholder based on index
-    const gradients = [
-      'linear-gradient(145deg,#4F46E5,#000)',
-      'linear-gradient(210deg,#10B981,#000)',
-      'linear-gradient(165deg,#F59E0B,#000)',
-      'linear-gradient(195deg,#EF4444,#000)',
-      'linear-gradient(225deg,#8B5CF6,#000)',
-      'linear-gradient(135deg,#06B6D4,#000)',
-      'linear-gradient(180deg,#EC4899,#000)',
-      'linear-gradient(120deg,#14B8A6,#000)',
-    ];
     // Return a data URL for gradient (we'll use CSS gradient instead)
     return '';
   };
@@ -164,7 +153,7 @@ export default function CampaignList() {
           {campaigns.map((campaign, index) => {
             const hasImage = !!campaign.display_art_url;
             const isGenerating = generatingArt.has(campaign.id);
-            const imageUrl = getCampaignImageUrl(campaign, index);
+            const imageUrl = getCampaignImageUrl(campaign);
             const gradient = getGradientForIndex(index);
             
             return (
