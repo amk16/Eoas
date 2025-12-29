@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Edit, Trash2 } from 'lucide-react';
 import api from '../../services/api';
 import type { Campaign } from '../../types';
 import CampaignWizardDrawer from './CampaignWizardDrawer';
@@ -211,15 +212,17 @@ export default function CampaignList() {
                     )}
                     <button
                       onClick={(e) => handleEdit(campaign.id, e)}
-                      className="px-4 py-2 bg-white/20 backdrop-blur-sm text-white rounded-lg hover:bg-white/30 text-sm font-medium transition-colors"
+                      className="p-2 bg-white/20 backdrop-blur-sm text-white rounded-lg hover:bg-white/30 transition-colors"
+                      aria-label="Edit campaign"
                     >
-                      Edit
+                      <Edit size={18} />
                     </button>
                     <button
                       onClick={(e) => handleDelete(campaign.id, e)}
-                      className="px-4 py-2 bg-red-500/80 backdrop-blur-sm text-white rounded-lg hover:bg-red-500 text-sm font-medium transition-colors"
+                      className="p-2 bg-red-500/80 backdrop-blur-sm text-white rounded-lg hover:bg-red-500 transition-colors"
+                      aria-label="Delete campaign"
                     >
-                      Delete
+                      <Trash2 size={18} />
                     </button>
                   </div>
                 </div>

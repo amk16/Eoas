@@ -1,8 +1,10 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { useConversation } from '@elevenlabs/react';
 import { EnhancedResponse } from './voice-assistant/EnhancedResponse';
 import { getConversationToken, submitAction, confirmAction, getPendingActions } from '../services/voiceAssistantService';
 import { useAuth } from '../context/AuthContext';
+import { getPulseDuration, getGlowIntensity, getSpinDuration, STATE_COLORS, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
+import { generateIdleSegments } from './voice-assistant/arcUtils';
 
 // Phase 1: Message structure for investigation
 interface MessageLog {
@@ -35,6 +37,13 @@ export default function VoiceAssistant() {
   const [messageLog, setMessageLog] = useState<MessageLog[]>([]);
   // Phase 2: Track the ID of the currently streaming message
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
+  // Phase 3: Ripple effect state
+  const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number }>>([]);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  // Phase 4: Track when button is pressed to trigger animation early
+  const [isButtonPressed, setIsButtonPressed] = useState(false);
+  // Phase 4: Track end of conversation animation state
+  const [isEndingConversation, setIsEndingConversation] = useState(false);
 
   const conversation = useConversation({
     onConnect: () => {
@@ -361,32 +370,141 @@ export default function VoiceAssistant() {
 
   const handleStop = async () => {
     try {
-      await conversation.endSession();
-      setMessages([]);
-      setPendingActions([]);
-      // Phase 2: Clear streaming state
-      setStreamingMessageId(null);
+      // Phase 4: Trigger end of conversation animation
+      setIsEndingConversation(true);
+      setIsButtonPressed(false);
+      
+      // Wait for animation to complete before ending session
+      const totalEndAnimationTime = 
+        END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade;
+      
+      setTimeout(async () => {
+        await conversation.endSession();
+        setMessages([]);
+        setPendingActions([]);
+        // Phase 2: Clear streaming state
+        setStreamingMessageId(null);
+        setIsEndingConversation(false);
+      }, totalEndAnimationTime * 1000);
     } catch (err: any) {
       console.error('Failed to stop conversation:', err);
       setError(err.message || 'Failed to stop conversation');
+      setIsEndingConversation(false);
     }
   };
 
   const isConnected = conversation.status === 'connected';
   const isConnecting = conversation.status === 'connecting' || isStarting;
 
+  // Phase 3: Determine button state for animations
+  // Phase 4: Add listening/speaking states and end animation
+  // Phase 5: 5-segment outer ring system
+  const showDashedSpinning = (isButtonPressed || isConnected) && !isEndingConversation;
+  
+  const buttonState: 'idle' | 'connecting' | 'listening' = isConnected 
+    ? 'listening' 
+    : isConnecting 
+    ? 'connecting' 
+    : 'idle';
+
+  // Phase 3: Get animation values based on state
+  const pulseDuration = getPulseDuration(buttonState === 'listening' ? 'connected' : buttonState);
+  const glowIntensity = getGlowIntensity(buttonState === 'listening' ? 'connected' : buttonState);
+
+  // Phase 5: Generate segment paths - always use full-length paths, control visibility with stroke-dasharray
+  const segmentPaths = useMemo(() => {
+    // Always generate full-length paths (72° each, touching)
+    // We'll use stroke-dasharray to control visible length
+    return generateIdleSegments();
+  }, []);
+
+  // Phase 5: CSS will handle stroke-dasharray animations, no need to set it in React
+
+  // Phase 5: Determine CSS class for outer ring based on state
+  const outerRingClass = useMemo(() => {
+    if (isEndingConversation) {
+      return 'ending-conversation-outer';
+    } else if (showDashedSpinning) {
+      return 'listening-state-outer';
+    } else {
+      return 'idle-state-outer';
+    }
+  }, [isEndingConversation, showDashedSpinning]);
+
+  // Phase 4: Handle button click - start when idle, stop when listening
+  const handleButtonClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left - rect.width / 2;
+      const y = e.clientY - rect.top - rect.height / 2;
+      
+      const rippleId = Date.now();
+      setRipples(prev => [...prev, { id: rippleId, x, y }]);
+      
+      // Remove ripple after animation completes
+      setTimeout(() => {
+        setRipples(prev => prev.filter(r => r.id !== rippleId));
+      }, RIPPLE_CONFIG.duration * 1000);
+    }
+    
+    // Phase 4: Trigger dashed/spinning animation on press
+    if (!isConnected) {
+      setIsButtonPressed(true);
+      handleStart();
+    } else {
+      handleStop();
+      setIsButtonPressed(false);
+    }
+  };
+  
+  // Reset button pressed state when disconnected
+  useEffect(() => {
+    if (!isConnected && !isConnecting) {
+      setIsButtonPressed(false);
+    }
+  }, [isConnected, isConnecting]);
+
   return (
     <div className="p-4 bg-black rounded-xl text-white">
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <h3 className="font-semibold text-lg">Voice Assistant</h3>
-        <div className="flex items-center gap-2">
-          <div className={`w-2 h-2 rounded-full ${
-            isConnected ? 'bg-green-500' : isConnecting ? 'bg-yellow-500' : 'bg-gray-500'
-          }`} />
-          <span className="text-sm text-gray-400">
-            {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
-          </span>
+        <div className="flex items-center gap-4">
+          {/* Connection Status */}
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${
+              isConnected ? 'bg-green-500' : isConnecting ? 'bg-yellow-500' : 'bg-gray-500'
+            }`} />
+            <span className="text-sm text-gray-400">
+              {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
+            </span>
+          </div>
+          {/* Listening Status */}
+          {isConnected && (
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                !conversation.isSpeaking ? 'bg-blue-500' : 'bg-gray-500'
+              }`} />
+              <span className={`text-sm ${
+                !conversation.isSpeaking ? 'text-blue-400' : 'text-gray-500'
+              }`}>
+                Listening
+              </span>
+            </div>
+          )}
+          {/* Speaking Status */}
+          {isConnected && (
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                conversation.isSpeaking ? 'bg-green-500' : 'bg-gray-500'
+              }`} />
+              <span className={`text-sm ${
+                conversation.isSpeaking ? 'text-green-400' : 'text-gray-500'
+              }`}>
+                Speaking
+              </span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -473,23 +591,77 @@ export default function VoiceAssistant() {
       )}
 
       {/* Controls */}
-      <div className="flex gap-2">
-        {!isConnected && !isConnecting ? (
+      <div className="flex gap-2 items-center justify-center">
+        {/* Phase 4: Button always visible, shows listening state when connected */}
+        <div className="relative w-24 h-24" style={{ padding: '2px' }}>
           <button
-            onClick={handleStart}
-            disabled={isStarting}
-            className="px-4 py-2 bg-white text-black rounded hover:bg-gray-200 disabled:opacity-50"
+            ref={buttonRef}
+            onClick={handleButtonClick}
+            disabled={isStarting && !isConnected}
+            className="relative w-full h-full rounded-full bg-transparent border-0 p-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none overflow-hidden"
+            aria-label={
+              isConnected 
+                ? 'Stop conversation' 
+                : isStarting 
+                ? 'Starting conversation' 
+                : 'Start conversation'
+            }
+            style={{
+              filter: `drop-shadow(0 0 ${GLOW_CONFIG.blur * glowIntensity}px ${GLOW_CONFIG.color})`,
+            }}
           >
-            {isStarting ? 'Starting...' : 'Start Conversation'}
+            {/* Ripple effects */}
+            {ripples.map((ripple) => (
+              <div
+                key={ripple.id}
+                className="absolute rounded-full pointer-events-none"
+                style={{
+                  left: '50%',
+                  top: '50%',
+                  width: '100%',
+                  height: '100%',
+                  border: `2px solid ${RIPPLE_CONFIG.color}`,
+                  transform: 'translate(-50%, -50%)',
+                  transformOrigin: 'center',
+                  animation: `voiceButtonRipple ${RIPPLE_CONFIG.duration}s ease-out forwards`,
+                  '--ripple-max-scale': RIPPLE_CONFIG.maxScale.toString(),
+                } as React.CSSProperties}
+              />
+            ))}
+            
+            {/* Inner ring - standard width (2px border), positioned inside outer ring with spacing */}
+            {/* Phase 4: Keep inner ring white (no color changes) */}
+            <div className="absolute inset-[12px] rounded-full border-2 border-white/80" />
           </button>
-        ) : (
-          <button
-            onClick={handleStop}
-            className="px-4 py-2 bg-red-500 hover:bg-red-600 rounded"
+          {/* Phase 5: Outer ring - 5 individual segments that animate length and rotate */}
+          <svg
+            className={`absolute inset-0 pointer-events-none ${outerRingClass}`}
+            style={{
+              width: '100%',
+              height: '100%',
+              border: 'none',
+              '--shrink-duration': `${LISTENING_ANIMATION_TIMING.step1_dashTransition}s`,
+              '--spin-duration': `${getSpinDuration()}s`,
+              '--grow-duration': `${END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade}s`,
+            } as React.CSSProperties}
+            viewBox="0 0 100 100"
+            preserveAspectRatio="none"
           >
-            End Conversation
-          </button>
-        )}
+            {/* Group all segments for rotation */}
+            <g>
+              {segmentPaths.map((path, index) => (
+                <path
+                  key={index}
+                  d={path}
+                  fill="none"
+                  stroke="white"
+                  strokeWidth="4"
+                  strokeLinecap="round"
+                />
+              ))}
+            </g>
+          </svg>
+        </div>
 
         {isConnected && conversation.canSendFeedback && (
           <div className="flex gap-2">
