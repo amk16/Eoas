@@ -18,7 +18,7 @@ if str(server_dir) not in sys.path:
 
 from src.db.database import init_database
 from src.db.firebase import init_firebase
-from src.routes import auth, characters, sessions, campaigns, audio, scribe_token, analyze, conversational_ai, images
+from src.routes import auth, characters, sessions, campaigns, audio, scribe_token, analyze, conversational_ai, images, ioun
 
 # Load environment variables
 load_dotenv()
@@ -134,6 +134,7 @@ app.include_router(audio.router, prefix="/api/audio", tags=["audio"])
 app.include_router(analyze.router, prefix="/api", tags=["analyze"])
 app.include_router(scribe_token.router, tags=["scribe"])
 app.include_router(conversational_ai.router, prefix="/api", tags=["conversational-ai"])
+app.include_router(ioun.router, prefix="/api", tags=["ioun"])
 app.include_router(images.router, prefix="/api/images", tags=["images"])
 
 # Serve static images

@@ -31,6 +31,7 @@ export default function SectionShell({
       { to: '/characters', label: 'Characters', description: 'Heroes' },
       { to: '/sessions', label: 'Sessions', description: 'Adventures' },
       { to: '/voice-assistant', label: 'Voice Assistant', description: 'AI Helper' },
+      { to: '/ioun', label: 'Ioun', description: 'Voice AI' },
     ],
     []
   );
