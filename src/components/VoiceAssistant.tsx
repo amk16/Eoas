@@ -1,404 +1,419 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { useConversation } from '@elevenlabs/react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { EnhancedResponse } from './voice-assistant/EnhancedResponse';
-import { getConversationToken, submitAction, confirmAction, getPendingActions } from '../services/voiceAssistantService';
+import { chatWithIoun } from '../services/iounService';
 import { useAuth } from '../context/AuthContext';
 import { getPulseDuration, getGlowIntensity, getSpinDuration, STATE_COLORS, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
 import { generateIdleSegments } from './voice-assistant/arcUtils';
+import LiveScribeSilence from './LiveScribeSilence';
+import ConversationsDrawer from './conversations/ConversationsDrawer';
+import { createConversation, getConversation, addMessage } from '../services/conversationService';
+import type { Conversation, ConversationMessage } from '../types';
 
-// Phase 1: Message structure for investigation
-interface MessageLog {
-  id: string;
-  type: string;
-  fullMessage: any;
-  timestamp: Date;
-}
-
-// Phase 2: Enhanced message structure for streaming support
-// Phase 1: Only assistant messages - user messages removed
 interface ChatMessage {
   id: string;
-  type: 'assistant';
+  type: 'user' | 'assistant';
   text: string;
   timestamp: Date;
   isStreaming: boolean;
-  source?: string;
-  role?: string;
 }
 
 export default function VoiceAssistant() {
   const { user } = useAuth();
+  const { conversationId: urlConversationId } = useParams<{ conversationId?: string }>();
+  const navigate = useNavigate();
   const [error, setError] = useState<string>('');
-  // Phase 2: Updated to use enhanced message structure
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [pendingActions, setPendingActions] = useState<any[]>([]);
   const [isStarting, setIsStarting] = useState(false);
-  // Phase 1: Track all messages for investigation
-  const [messageLog, setMessageLog] = useState<MessageLog[]>([]);
-  // Phase 2: Track the ID of the currently streaming message
-  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null);
-  // Phase 3: Ripple effect state
   const [ripples, setRipples] = useState<Array<{ id: number; x: number; y: number }>>([]);
   const buttonRef = useRef<HTMLButtonElement>(null);
-  // Phase 4: Track when button is pressed to trigger animation early
   const [isButtonPressed, setIsButtonPressed] = useState(false);
-  // Phase 4: Track end of conversation animation state
   const [isEndingConversation, setIsEndingConversation] = useState(false);
+  
+  // Conversation management
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(urlConversationId || null);
+  const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
+  const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isLoadingConversation, setIsLoadingConversation] = useState(false);
+  
+  // LiveScribeSilence state
+  const [scribeStatus, setScribeStatus] = useState<'idle' | 'getting-token' | 'connecting' | 'connected' | 'error'>('idle');
+  const [isScribeActive, setIsScribeActive] = useState(false);
+  
+  // Transcript accumulation
+  const processedSilenceTranscriptRef = useRef<string>('');
+  const isProcessingRef = useRef(false);
 
-  const conversation = useConversation({
-    onConnect: () => {
-      console.log('[VoiceAssistant] Connected');
-      setError('');
-    },
-    onDisconnect: () => {
-      console.log('[VoiceAssistant] Disconnected');
-    },
-    onMessage: (message: any) => {
-      // Phase 1: Comprehensive logging to understand message structure
-      const messageId = message.id || message.message_id || `msg-${Date.now()}-${Math.random()}`;
+  const accumulatedTranscriptRef = useRef<string>('');
+  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  
+  // NEW: Track if silence was detected but we are waiting for the text commit
+  const pendingSilenceTriggerRef = useRef<boolean>(false);
+
+  // Silence detection - track last 5 transcripts (kept for backward compatibility, but LiveScribeSilence handles pattern detection)
+  const recentTranscriptsRef = useRef<string[]>([]);
+  const lastCommittedTranscriptRef = useRef<string>('');
+  
+  // TTS audio
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [isPlayingAudio, setIsPlayingAudio] = useState(false);
+  
+  // Conversation history (kept for backward compatibility, but now managed via Firestore)
+  const conversationHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  
+  // Load conversation from URL param on mount
+  useEffect(() => {
+    if (urlConversationId && urlConversationId !== currentConversationId) {
+      loadConversation(urlConversationId);
+    } else if (!urlConversationId && currentConversationId) {
+      // URL changed to remove conversation ID - clear current conversation
+      setCurrentConversationId(null);
+      setCurrentConversation(null);
+      setMessages([]);
+    }
+  }, [urlConversationId]);
+  
+  const loadConversation = async (conversationId: string) => {
+    try {
+      setIsLoadingConversation(true);
+      setError(''); // Clear any previous errors
+      const conversation = await getConversation(conversationId);
+      setCurrentConversationId(conversationId);
+      setCurrentConversation(conversation);
       
-      console.group(`[VoiceAssistant] Message Received (ID: ${messageId})`);
-      console.log('Full message object:', JSON.stringify(message, null, 2));
-      console.log('Message type:', message.type);
-      console.log('Message keys:', Object.keys(message));
-      console.log('Text property:', message.text);
-      console.log('Message property:', message.message);
+      // Load messages from conversation (both user and assistant for display)
+      const loadedMessages: ChatMessage[] = conversation.messages.map(msg => ({
+        id: msg.id,
+        type: msg.role as 'user' | 'assistant',
+        text: msg.content,
+        timestamp: new Date(msg.timestamp),
+        isStreaming: false,
+      }));
       
-      // Check for streaming-related properties
-      const streamingProps = {
-        type: message.type,
-        text: message.text,
-        message: message.message,
-        id: message.id,
-        message_id: message.message_id,
-        conversation_id: message.conversation_id,
-        timestamp: message.timestamp,
-        is_final: message.is_final,
-        is_tentative: message.is_tentative,
-        is_streaming: message.is_streaming,
-        is_complete: message.is_complete,
-        chunk_index: message.chunk_index,
-        chunk_id: message.chunk_id,
-        sequence: message.sequence,
-        sequence_number: message.sequence_number,
-        role: message.role,
-        status: message.status,
-        delta: message.delta,
-        content: message.content,
-      };
-      console.log('Streaming-related properties:', streamingProps);
-      console.groupEnd();
+      setMessages(loadedMessages);
       
-      // Phase 1: Store message in log for analysis
-      setMessageLog(prev => [...prev, {
-        id: messageId,
-        type: message.type || 'unknown',
-        fullMessage: message,
-        timestamp: new Date()
+      // Update conversation history ref for backend context
+      conversationHistoryRef.current = conversation.messages.map(msg => ({
+        role: msg.role,
+        content: msg.content,
+      }));
+      
+      console.log(`[VoiceAssistant] Loaded conversation ${conversationId} with ${conversation.messages.length} messages`);
+    } catch (err: any) {
+      console.error('Error loading conversation:', err);
+      const errorMessage = err.message || 'Failed to load conversation';
+      setError(errorMessage);
+      // Navigate back to base route if conversation doesn't exist
+      if (err.response?.status === 404) {
+        navigate('/ioun-silence');
+      }
+    } finally {
+      setIsLoadingConversation(false);
+    }
+  };
+  
+  const startNewConversation = async () => {
+    try {
+      setError(''); // Clear any previous errors
+      
+      // Clear current state
+      setMessages([]);
+      conversationHistoryRef.current = [];
+      accumulatedTranscriptRef.current = '';
+      lastCommittedTranscriptRef.current = '';
+      recentTranscriptsRef.current = [];
+      processedSilenceTranscriptRef.current = '';
+      clearSilenceTimer();
+      stopTTSAudio();
+      
+      // Create new conversation
+      const newConversation = await createConversation();
+      setCurrentConversationId(newConversation.id);
+      setCurrentConversation(newConversation);
+      navigate(`/ioun-silence/${newConversation.id}`);
+      console.log(`[VoiceAssistant] Started new conversation: ${newConversation.id}`);
+    } catch (err: any) {
+      console.error('Error creating conversation:', err);
+      const errorMessage = err.message || 'Failed to create conversation';
+      setError(errorMessage);
+    }
+  };
+
+  // Clear silence timer
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  // Reset silence timer (3 seconds after last committed transcript)
+  const resetSilenceTimer = () => {
+    clearSilenceTimer();
+    const currentTranscript = accumulatedTranscriptRef.current.trim();
+    
+    if (isScribeActive && !isProcessing && currentTranscript) {
+      console.log('[VoiceAssistant] Setting standard silence timer (3s fallback)');
+      silenceTimerRef.current = setTimeout(() => {
+        const transcriptAtExpiry = accumulatedTranscriptRef.current.trim();
+        if (transcriptAtExpiry && !isProcessing) {
+          console.log('[VoiceAssistant] 3s Timer Expired -> Triggering');
+          handleSilence();
+        }
+      }, 3000);
+    }
+  };
+
+  // Handle silence - send accumulated transcript to backend
+  const handleSilence = async () => {
+    console.log('[VoiceAssistant] ===== HANDLING SILENCE =====');
+    const transcript = accumulatedTranscriptRef.current.trim();
+    
+    // Safety check: Don't process empty transcripts or if already processing
+    if (!transcript || isProcessingRef.current) {
+      console.log('[VoiceAssistant] ✗ Skipping (Empty or Processing)');
+      return;
+    }
+
+    // Reset pending flag since we are handling it now
+    pendingSilenceTriggerRef.current = false;
+
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+    pendingSilenceTriggerRef.current = false;
+
+    clearSilenceTimer();
+
+    
+    
+    try {
+      console.log('[VoiceAssistant] Sending to Backend:', transcript);
+      
+      // Create conversation if we don't have one yet
+      let conversationId = currentConversationId;
+      if (!conversationId) {
+        const newConversation = await createConversation();
+        conversationId = newConversation.id;
+        setCurrentConversationId(conversationId);
+        setCurrentConversation(newConversation);
+        navigate(`/ioun-silence/${conversationId}`);
+      }
+      
+      // Save user message to Firestore
+      if (conversationId) {
+        try {
+          await addMessage(conversationId, 'user', transcript);
+          console.log(`[VoiceAssistant] Saved user message to conversation ${conversationId}`);
+        } catch (err) {
+          console.error('Error saving user message:', err);
+          // Continue even if save fails - don't block the conversation
+        }
+      }
+      
+      const response = await chatWithIoun(transcript, undefined, conversationId);
+      
+      // Add user message to display (if not already shown)
+      const userMessageId = `user-${Date.now()}-${Math.random()}`;
+      setMessages(prev => [...prev, {
+        id: userMessageId,
+        type: 'user',
+        text: transcript,
+        timestamp: new Date(),
+        isStreaming: false
       }]);
       
-      // Phase 2: Enhanced message handling with streaming support
-      // Phase 1: Only handle assistant messages - user messages are ignored
-      const messageContent = message.text || message.message || '';
+      // Add assistant message
+      const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
+      setMessages(prev => [...prev, {
+        id: assistantMessageId,
+        type: 'assistant',
+        text: response.response,
+        timestamp: new Date(),
+        isStreaming: false
+      }]);
+
+      conversationHistoryRef.current.push({ role: 'user', content: transcript });
+      conversationHistoryRef.current.push({ role: 'assistant', content: response.response });
       
-      const isAssistantMessage = 
-        message.type === 'assistant_message' || 
-        message.type === 'agent_message' ||
-        (message.role === 'agent' && message.source === 'ai') ||
-        message.role === 'agent' ||
-        message.source === 'ai';
-
-      if (isAssistantMessage && messageContent) {
-        // Phase 2: Handle assistant messages - check if this is an update to existing message
-        const isStreaming = message.is_streaming || message.is_tentative || 
-                          message.status === 'streaming' || 
-                          (message.delta !== undefined && message.delta !== null);
-        
-        // Check if we have a streaming message in progress
-        if (isStreaming && streamingMessageId) {
-          // Update existing streaming message
-          setMessages(prev => prev.map(msg => {
-            if (msg.id === streamingMessageId) {
-              // If delta exists, append it; otherwise replace with new content
-              const updatedText = message.delta 
-                ? msg.text + message.delta 
-                : messageContent;
-              return {
-                ...msg,
-                text: updatedText,
-                isStreaming: true
-              };
-            }
-            return msg;
-          }));
-        } else if (isStreaming) {
-          // Start new streaming message
-          const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
-          setStreamingMessageId(assistantMessageId);
-          setMessages(prev => [...prev, {
-            id: assistantMessageId,
-            type: 'assistant',
-            text: messageContent,
-            timestamp: new Date(),
-            isStreaming: true,
-            source: message.source,
-            role: message.role
-          }]);
-        } else {
-          // Complete message (not streaming)
-          // If we were streaming, mark it as complete
-          if (streamingMessageId) {
-            setMessages(prev => prev.map(msg => {
-              if (msg.id === streamingMessageId) {
-                return {
-                  ...msg,
-                  text: messageContent,
-                  isStreaming: false
-                };
-              }
-              return msg;
-            }));
-            setStreamingMessageId(null);
-          } else {
-            // New complete message
-            const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
-            setMessages(prev => [...prev, {
-              id: assistantMessageId,
-              type: 'assistant',
-              text: messageContent,
-              timestamp: new Date(),
-              isStreaming: false,
-              source: message.source,
-              role: message.role
-            }]);
-          }
-        }
-      } else if (message.type === 'function_call' || message.type === 'tool_call') {
-        // Handle tool calls - these need to be sent to backend for confirmation
-        handleToolCall(message);
-      } else {
-        // Log unhandled message types for investigation
-        console.warn('[VoiceAssistant] Unhandled message type:', message.type, message);
-      }
-    },
-    onAgentChatResponsePart: (part: any) => {
-      // Phase 1 & 2: Investigate and handle streaming response parts
-      console.group('[VoiceAssistant] Agent Chat Response Part');
-      console.log('Response part:', JSON.stringify(part, null, 2));
-      console.log('Part keys:', Object.keys(part));
-      console.log('Part content:', part.content || part.text || part.message);
-      console.log('Part delta:', part.delta);
-      console.log('Part index:', part.index);
-      console.log('Part is_final:', part.is_final);
-      console.log('Part is_complete:', part.is_complete);
-      console.groupEnd();
-
-      // Phase 2: Handle streaming response parts
-      const partContent = part.content || part.text || part.message || '';
-      const isComplete = part.is_final || part.is_complete || part.status === 'complete';
-      
-      if (partContent) {
-        if (streamingMessageId) {
-          // Update existing streaming message
-          setMessages(prev => prev.map(msg => {
-            if (msg.id === streamingMessageId) {
-              // If delta exists, append it; otherwise use the full content
-              const updatedText = part.delta 
-                ? msg.text + part.delta 
-                : partContent;
-              return {
-                ...msg,
-                text: updatedText,
-                isStreaming: !isComplete
-              };
-            }
-            return msg;
-          }));
-
-          // If this part is complete, clear the streaming message ID
-          if (isComplete) {
-            setStreamingMessageId(null);
-          }
-        } else if (!isComplete) {
-          // Start new streaming message
-          const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
-          setStreamingMessageId(assistantMessageId);
-          setMessages(prev => [...prev, {
-            id: assistantMessageId,
-            type: 'assistant',
-            text: partContent,
-            timestamp: new Date(),
-            isStreaming: true
-          }]);
-        } else {
-          // Complete message from response part
-          const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
-          setMessages(prev => [...prev, {
-            id: assistantMessageId,
-            type: 'assistant',
-            text: partContent,
-            timestamp: new Date(),
-            isStreaming: false
-          }]);
+      // Save assistant message to Firestore
+      if (conversationId) {
+        try {
+          await addMessage(conversationId, 'assistant', response.response);
+          console.log(`[VoiceAssistant] Saved assistant message to conversation ${conversationId}`);
+        } catch (err) {
+          console.error('Error saving assistant message:', err);
+          // Continue even if save fails - don't block the conversation
+          // Show a non-blocking warning
+          console.warn('[VoiceAssistant] Message may not have been saved to conversation history');
         }
       }
-    },
-    onDebug: (debugInfo: any) => {
-      // Phase 1: Log debug information which may contain streaming details
-      console.log('[VoiceAssistant] Debug:', debugInfo);
-    },
-    onError: (error: any) => {
-      console.error('[VoiceAssistant] Error:', error);
-      setError(error.message || 'An error occurred');
-    },
-    onModeChange: (prop: { mode: any }) => {
-      console.log('[VoiceAssistant] Mode changed:', prop.mode);
-    },
-    onStatusChange: (prop: { status: any }) => {
-      console.log('[VoiceAssistant] Status changed:', prop.status);
-    },
-    onUnhandledClientToolCall: (toolCall: any) => {
-      console.log('[VoiceAssistant] Unhandled tool call:', toolCall);
-      // Handle client-side tool calls if needed
-      handleToolCall(toolCall);
-    }
-  });
+      
+      // Clear accumulated transcript
+      accumulatedTranscriptRef.current = '';
+      lastCommittedTranscriptRef.current = '';
+      recentTranscriptsRef.current = [];
 
-  // Load pending actions on mount and when conversation connects
-  useEffect(() => {
-    if (conversation.status === 'connected') {
-      loadPendingActions();
-    }
-  }, [conversation.status]);
-
-  const loadPendingActions = async () => {
-    try {
-      const actions = await getPendingActions();
-      setPendingActions(actions);
+      setTimeout(() => {
+        processedSilenceTranscriptRef.current = '';
+      }, 5000);
+      
+      if (response.audio_base64) {
+        playTTSAudio(response.audio_base64);
+      }
     } catch (err: any) {
-      console.error('Failed to load pending actions:', err);
+      console.error('[VoiceAssistant] Error:', err);
+      setError(err.message || 'Failed to process transcript');
+    } finally {
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+
     }
   };
 
-  const handleToolCall = async (toolCall: any) => {
+  // Play TTS audio
+  const playTTSAudio = (audioBase64: string) => {
     try {
-      // Extract tool name and parameters
-      const toolName = toolCall.function?.name || toolCall.name || toolCall.tool_name;
-      const parameters = toolCall.function?.arguments 
-        ? (typeof toolCall.function.arguments === 'string' 
-            ? JSON.parse(toolCall.function.arguments) 
-            : toolCall.function.arguments)
-        : toolCall.parameters || {};
+      stopTTSAudio();
+      const dataUrl = `data:audio/mpeg;base64,${audioBase64}`;
+      const audio = new Audio(dataUrl);
+      audioRef.current = audio;
+      
+      audio.onplay = () => setIsPlayingAudio(true);
+      audio.onended = () => {
+        setIsPlayingAudio(false);
+        audioRef.current = null;
+      };
+      audio.onerror = () => {
+        setIsPlayingAudio(false);
+        audioRef.current = null;
+      };
+      
+      audio.play().catch(console.error);
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
-      if (!toolName) {
-        console.warn('Tool call missing name:', toolCall);
+  const stopTTSAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = 0;
+      audioRef.current = null;
+      setIsPlayingAudio(false);
+    }
+  };
+
+  // Handle transcript from LiveScribeSilence (committed transcripts)
+  const handleTranscript = (transcript: string) => {
+    if (!transcript || !transcript.trim()) return;
+
+    if (processedSilenceTranscriptRef.current === transcript) {
+        console.log('[VoiceAssistant] ignoring server commit (already process via silence detection) Skipping.');
         return;
-      }
-
-      // Submit to backend for confirmation
-      const action = await submitAction(toolName, parameters);
-      setPendingActions(prev => [...prev, action]);
-    } catch (err: any) {
-      console.error('Failed to handle tool call:', err);
-      setError(err.message || 'Failed to process tool call');
     }
-  };
-
-  const handleConfirmAction = async (actionId: string, confirmed: boolean) => {
-    try {
-      await confirmAction(actionId, confirmed);
-      setPendingActions(prev => prev.filter(a => a.action_id !== actionId));
+    
+    if (isPlayingAudio) stopTTSAudio();
+    
+    const isNewTranscript = transcript !== lastCommittedTranscriptRef.current;
+    
+    if (isNewTranscript) {
+      // 1. Accumulate the text
+      if (accumulatedTranscriptRef.current) {
+        accumulatedTranscriptRef.current += ' ' + transcript;
+      } else {
+        accumulatedTranscriptRef.current = transcript;
+      }
+      lastCommittedTranscriptRef.current = transcript;
       
-      if (confirmed) {
-        // Reload pending actions to get updated list
-        await loadPendingActions();
-      }
-    } catch (err: any) {
-      console.error('Failed to confirm action:', err);
-      setError(err.message || 'Failed to confirm action');
+      console.log(`[VoiceAssistant] Text Committed. Pending Silence? ${pendingSilenceTriggerRef.current}`);
+
+      // Standard flow: User might still be talking, reset timer
+      resetSilenceTimer();
     }
   };
 
+  // Handle silence detection from LiveScribeSilence
+  const handleSilenceDetected = (partialText: string) => {
+    console.log('[VoiceAssistant] 🚀 FAST SILENCE DETECTED');
+    
+    // 1. If we received text, trust it immediately
+    if (partialText && partialText.trim()) {
+        console.log('[VoiceAssistant] Trusting partial text:', partialText);
+        
+        // Force the accumulator to this text
+        accumulatedTranscriptRef.current = partialText;
+        
+        // Mark this text as "processed" so we ignore the delayed server commit
+        processedSilenceTranscriptRef.current = partialText;
+        
+        // Trigger immediately
+        handleSilence();
+    } else {
+        // Fallback if somehow text is empty (rare)
+        console.log('[VoiceAssistant] Silence detected but no text provided.');
+    }
+  };
+
+  // Handle LiveScribeSilence status change
+  const handleScribeStatusChange = (status: 'idle' | 'getting-token' | 'connecting' | 'connected' | 'error') => {
+    setScribeStatus(status);
+    if (status !== 'connected') {
+      recentTranscriptsRef.current = [];
+      clearSilenceTimer();
+      pendingSilenceTriggerRef.current = false;
+    }
+  };
+
+  // Handle start
   const handleStart = async () => {
     try {
       setError('');
       setIsStarting(true);
-
-      // Request microphone permission first
       await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      // Get conversation token from backend
-      const tokenData = await getConversationToken();
-
-      // Start session with signed URL or conversation token
-      let conversationId: string | undefined;
-      
-      if (tokenData.signedUrl) {
-        conversationId = await conversation.startSession({
-          signedUrl: tokenData.signedUrl,
-          connectionType: 'websocket',
-          userId: user?.id?.toString() || undefined,
-        });
-      } else if (tokenData.conversationToken) {
-        conversationId = await conversation.startSession({
-          conversationToken: tokenData.conversationToken,
-          connectionType: 'webrtc',
-          userId: user?.id?.toString() || undefined,
-        });
-      } else if (tokenData.agentId || tokenData.agent_id) {
-        const agentId = tokenData.agentId || tokenData.agent_id;
-        if (!agentId) {
-          throw new Error('Agent ID is required but was not provided');
-        }
-        conversationId = await conversation.startSession({
-          agentId: agentId,
-          connectionType: 'websocket', // Default to websocket
-          userId: user?.id?.toString() || undefined,
-        });
-      } else {
-        throw new Error('No valid connection credentials received from server');
-      }
-
-      console.log('[VoiceAssistant] Conversation started:', conversationId);
+      setIsScribeActive(true);
+      setIsStarting(false);
     } catch (err: any) {
-      console.error('Failed to start conversation:', err);
-      setError(err.message || 'Failed to start conversation');
-    } finally {
+      setError(err.message || 'Failed to start');
       setIsStarting(false);
     }
   };
 
+  // Handle stop
   const handleStop = async () => {
     try {
-      // Phase 4: Trigger end of conversation animation
       setIsEndingConversation(true);
       setIsButtonPressed(false);
+      setIsScribeActive(false);
+      clearSilenceTimer();
+      stopTTSAudio();
+      accumulatedTranscriptRef.current = '';
+      pendingSilenceTriggerRef.current = false;
       
-      // Wait for animation to complete before ending session
-      const totalEndAnimationTime = 
-        END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade;
-      
-      setTimeout(async () => {
-        await conversation.endSession();
+      const totalEndAnimationTime = END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade;
+      setTimeout(() => {
         setMessages([]);
-        setPendingActions([]);
-        // Phase 2: Clear streaming state
-        setStreamingMessageId(null);
+        conversationHistoryRef.current = [];
+        accumulatedTranscriptRef.current = '';
         setIsEndingConversation(false);
+        setIsStarting(false);
+        // Don't clear conversation - user might want to continue it later
       }, totalEndAnimationTime * 1000);
     } catch (err: any) {
-      console.error('Failed to stop conversation:', err);
-      setError(err.message || 'Failed to stop conversation');
+      setError(err.message || 'Failed to stop');
       setIsEndingConversation(false);
     }
   };
 
-  const isConnected = conversation.status === 'connected';
-  const isConnecting = conversation.status === 'connecting' || isStarting;
+  useEffect(() => {
+    return () => {
+      clearSilenceTimer();
+      stopTTSAudio();
+    };
+  }, []);
 
-  // Phase 3: Determine button state for animations
-  // Phase 4: Add listening/speaking states and end animation
-  // Phase 5: 5-segment outer ring system
+  const isConnected = scribeStatus === 'connected';
+  const isConnecting = scribeStatus === 'connecting' || scribeStatus === 'getting-token' || isStarting;
   const showDashedSpinning = (isButtonPressed || isConnected) && !isEndingConversation;
   
   const buttonState: 'idle' | 'connecting' | 'listening' = isConnected 
@@ -407,47 +422,25 @@ export default function VoiceAssistant() {
     ? 'connecting' 
     : 'idle';
 
-  // Phase 3: Get animation values based on state
   const pulseDuration = getPulseDuration(buttonState === 'listening' ? 'connected' : buttonState);
   const glowIntensity = getGlowIntensity(buttonState === 'listening' ? 'connected' : buttonState);
+  const segmentPaths = useMemo(() => generateIdleSegments(), []);
 
-  // Phase 5: Generate segment paths - always use full-length paths, control visibility with stroke-dasharray
-  const segmentPaths = useMemo(() => {
-    // Always generate full-length paths (72° each, touching)
-    // We'll use stroke-dasharray to control visible length
-    return generateIdleSegments();
-  }, []);
-
-  // Phase 5: CSS will handle stroke-dasharray animations, no need to set it in React
-
-  // Phase 5: Determine CSS class for outer ring based on state
   const outerRingClass = useMemo(() => {
-    if (isEndingConversation) {
-      return 'ending-conversation-outer';
-    } else if (showDashedSpinning) {
-      return 'listening-state-outer';
-    } else {
-      return 'idle-state-outer';
-    }
+    if (isEndingConversation) return 'ending-conversation-outer';
+    if (showDashedSpinning) return 'listening-state-outer';
+    return 'idle-state-outer';
   }, [isEndingConversation, showDashedSpinning]);
 
-  // Phase 4: Handle button click - start when idle, stop when listening
   const handleButtonClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     if (buttonRef.current) {
       const rect = buttonRef.current.getBoundingClientRect();
       const x = e.clientX - rect.left - rect.width / 2;
       const y = e.clientY - rect.top - rect.height / 2;
-      
-      const rippleId = Date.now();
-      setRipples(prev => [...prev, { id: rippleId, x, y }]);
-      
-      // Remove ripple after animation completes
-      setTimeout(() => {
-        setRipples(prev => prev.filter(r => r.id !== rippleId));
-      }, RIPPLE_CONFIG.duration * 1000);
+      setRipples(prev => [...prev, { id: Date.now(), x, y }]);
+      setTimeout(() => setRipples(prev => prev.slice(1)), RIPPLE_CONFIG.duration * 1000);
     }
     
-    // Phase 4: Trigger dashed/spinning animation on press
     if (!isConnected) {
       setIsButtonPressed(true);
       handleStart();
@@ -457,7 +450,6 @@ export default function VoiceAssistant() {
     }
   };
   
-  // Reset button pressed state when disconnected
   useEffect(() => {
     if (!isConnected && !isConnecting) {
       setIsButtonPressed(false);
@@ -466,180 +458,95 @@ export default function VoiceAssistant() {
 
   return (
     <div className="p-4 bg-black rounded-xl text-white">
+      {/* Hidden LiveScribeSilence component */}
+      <div style={{ display: 'none' }}>
+        <LiveScribeSilence
+          active={isScribeActive}
+          hidden={true}
+          onTranscript={handleTranscript}
+          onStatusChange={handleScribeStatusChange}
+          onErrorChange={setError}
+          onSilenceDetected={handleSilenceDetected}
+        />
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
-        <h3 className="font-semibold text-lg">Voice Assistant</h3>
-        <div className="flex items-center gap-4">
-          {/* Connection Status */}
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${
-              isConnected ? 'bg-green-500' : isConnecting ? 'bg-yellow-500' : 'bg-gray-500'
-            }`} />
-            <span className="text-sm text-gray-400">
-              {isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
+        <div className="flex items-center gap-3">
+          <h3 className="font-semibold text-lg">Voice Assistant</h3>
+          {currentConversation && (
+            <span className="text-sm text-neutral-400 truncate max-w-xs">
+              {currentConversation.title}
             </span>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setIsDrawerOpen(true)}
+            className="px-3 py-1.5 text-sm bg-white/5 text-white border border-white/10 rounded-lg hover:bg-white/10 transition-colors"
+          >
+            Conversations
+          </button>
+          <button
+            onClick={startNewConversation}
+            className="px-3 py-1.5 text-sm bg-white text-black rounded-lg hover:bg-neutral-200 transition-colors font-medium"
+          >
+            New Chat
+          </button>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : isConnecting ? 'bg-yellow-500' : 'bg-gray-500'}`} />
+            <span className="text-sm text-gray-400">{isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}</span>
           </div>
-          {/* Listening Status */}
           {isConnected && (
             <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${
-                !conversation.isSpeaking ? 'bg-blue-500' : 'bg-gray-500'
-              }`} />
-              <span className={`text-sm ${
-                !conversation.isSpeaking ? 'text-blue-400' : 'text-gray-500'
-              }`}>
-                Listening
-              </span>
+              <div className={`w-2 h-2 rounded-full ${!isPlayingAudio ? 'bg-blue-500' : 'bg-gray-500'}`} />
+              <span className={`text-sm ${!isPlayingAudio ? 'text-blue-400' : 'text-gray-500'}`}>Listening</span>
             </div>
           )}
-          {/* Speaking Status */}
           {isConnected && (
             <div className="flex items-center gap-2">
-              <div className={`w-2 h-2 rounded-full ${
-                conversation.isSpeaking ? 'bg-green-500' : 'bg-gray-500'
-              }`} />
-              <span className={`text-sm ${
-                conversation.isSpeaking ? 'text-green-400' : 'text-gray-500'
-              }`}>
-                Speaking
-              </span>
+              <div className={`w-2 h-2 rounded-full ${isPlayingAudio ? 'bg-green-500' : 'bg-gray-500'}`} />
+              <span className={`text-sm ${isPlayingAudio ? 'text-green-400' : 'text-gray-500'}`}>Speaking</span>
             </div>
           )}
         </div>
       </div>
 
-      {error && (
-        <div className="mb-4 p-3 bg-red-900/50 border border-red-500 rounded text-red-200 text-sm">
-          {error}
-        </div>
-      )}
-
-      {conversation.isSpeaking && (
-        <div className="mb-4 p-2 bg-neutral-800/50 border border-neutral-700 rounded text-neutral-300 text-sm">
-          🎤 Assistant is speaking...
-        </div>
-      )}
-
-      {/* Messages - Phase 1: Direct rendering on black background, no containers */}
-      {messages.length > 0 && (
-        <div className="space-y-8">
-          {messages.map((msg) => (
-            <div key={msg.id} className="relative">
-              {msg.isStreaming && (
-                <span className="absolute -left-4 top-0 text-xs text-neutral-500 animate-pulse">●</span>
-              )}
-              <div className="prose prose-invert prose-sm max-w-none text-neutral-200">
-                <EnhancedResponse isAnimating={msg.isStreaming}>
-                  {msg.text}
-                </EnhancedResponse>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Phase 1: Message Log for Investigation */}
-      {messageLog.length > 0 && (
-        <details className="mt-4">
-          <summary className="cursor-pointer text-sm text-gray-400 hover:text-gray-300">
-            🔍 Phase 1: Message Log ({messageLog.length} messages) - Click to expand
-          </summary>
-          <div className="mt-2 space-y-2 max-h-96 overflow-y-auto bg-neutral-800 rounded p-2 text-xs">
-            {messageLog.map((log, idx) => (
-              <div key={log.id} className="border-b border-neutral-700 pb-2 last:border-0">
-                <div className="font-mono text-gray-300">
-                  <div className="font-semibold text-yellow-400">
-                    [{idx + 1}] Type: {log.type} | ID: {log.id}
-                  </div>
-                  <div className="text-gray-400 mt-1">
-                    Time: {log.timestamp.toLocaleTimeString()}
-                  </div>
-                  <pre className="mt-2 text-gray-300 whitespace-pre-wrap break-words">
-                    {JSON.stringify(log.fullMessage, null, 2)}
-                  </pre>
-                </div>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-
-      {/* Pending Actions */}
-      {pendingActions.length > 0 && (
-        <div className="space-y-2">
-          <h4 className="font-semibold text-sm">Pending Actions:</h4>
-          {pendingActions.map((action) => (
-            <div key={action.action_id} className="p-3 bg-yellow-900/30 border border-yellow-500 rounded">
-              <p className="text-sm mb-2">{action.description}</p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => handleConfirmAction(action.action_id, true)}
-                  className="px-3 py-1 bg-green-600 hover:bg-green-700 rounded text-sm"
-                >
-                  Approve
-                </button>
-                <button
-                  onClick={() => handleConfirmAction(action.action_id, false)}
-                  className="px-3 py-1 bg-red-600 hover:bg-red-700 rounded text-sm"
-                >
-                  Reject
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {error && <div className="mb-4 p-3 bg-red-900/50 border border-red-500 rounded text-red-200 text-sm">{error}</div>}
+      {isProcessing && <div className="mb-4 p-2 bg-neutral-800/50 border border-neutral-700 rounded text-neutral-300 text-sm">Processing...</div>}
+      {isPlayingAudio && <div className="mb-4 p-2 bg-neutral-800/50 border border-neutral-700 rounded text-neutral-300 text-sm">🎤 Assistant is speaking...</div>}
 
       {/* Controls */}
       <div className="flex gap-2 items-center justify-center">
-        {/* Phase 4: Button always visible, shows listening state when connected */}
         <div className="relative w-24 h-24" style={{ padding: '2px' }}>
           <button
             ref={buttonRef}
             onClick={handleButtonClick}
             disabled={isStarting && !isConnected}
             className="relative w-full h-full rounded-full bg-transparent border-0 p-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none overflow-hidden"
-            aria-label={
-              isConnected 
-                ? 'Stop conversation' 
-                : isStarting 
-                ? 'Starting conversation' 
-                : 'Start conversation'
-            }
-            style={{
-              filter: `drop-shadow(0 0 ${GLOW_CONFIG.blur * glowIntensity}px ${GLOW_CONFIG.color})`,
-            }}
+            style={{ filter: `drop-shadow(0 0 ${GLOW_CONFIG.blur * glowIntensity}px ${GLOW_CONFIG.color})` }}
           >
-            {/* Ripple effects */}
             {ripples.map((ripple) => (
               <div
                 key={ripple.id}
                 className="absolute rounded-full pointer-events-none"
                 style={{
-                  left: '50%',
-                  top: '50%',
-                  width: '100%',
-                  height: '100%',
+                  left: '50%', top: '50%', width: '100%', height: '100%',
                   border: `2px solid ${RIPPLE_CONFIG.color}`,
                   transform: 'translate(-50%, -50%)',
-                  transformOrigin: 'center',
                   animation: `voiceButtonRipple ${RIPPLE_CONFIG.duration}s ease-out forwards`,
                   '--ripple-max-scale': RIPPLE_CONFIG.maxScale.toString(),
                 } as React.CSSProperties}
               />
             ))}
-            
-            {/* Inner ring - standard width (2px border), positioned inside outer ring with spacing */}
-            {/* Phase 4: Keep inner ring white (no color changes) */}
             <div className="absolute inset-[12px] rounded-full border-2 border-white/80" />
           </button>
-          {/* Phase 5: Outer ring - 5 individual segments that animate length and rotate */}
           <svg
             className={`absolute inset-0 pointer-events-none ${outerRingClass}`}
             style={{
-              width: '100%',
-              height: '100%',
-              border: 'none',
+              width: '100%', height: '100%', border: 'none',
               '--shrink-duration': `${LISTENING_ANIMATION_TIMING.step1_dashTransition}s`,
               '--spin-duration': `${getSpinDuration()}s`,
               '--grow-duration': `${END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade}s`,
@@ -647,41 +554,50 @@ export default function VoiceAssistant() {
             viewBox="0 0 100 100"
             preserveAspectRatio="none"
           >
-            {/* Group all segments for rotation */}
             <g>
               {segmentPaths.map((path, index) => (
-                <path
-                  key={index}
-                  d={path}
-                  fill="none"
-                  stroke="white"
-                  strokeWidth="4"
-                  strokeLinecap="round"
-                />
+                <path key={index} d={path} fill="none" stroke="white" strokeWidth="4" strokeLinecap="round" />
               ))}
             </g>
           </svg>
         </div>
-
-        {isConnected && conversation.canSendFeedback && (
-          <div className="flex gap-2">
-            <button
-              onClick={() => conversation.sendFeedback(true)}
-              className="px-3 py-2 bg-green-600 hover:bg-green-700 rounded text-sm"
-              title="Positive feedback"
-            >
-              👍
-            </button>
-            <button
-              onClick={() => conversation.sendFeedback(false)}
-              className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded text-sm"
-              title="Negative feedback"
-            >
-              👎
-            </button>
-          </div>
-        )}
       </div>
+
+      {/* Messages */}
+      {messages.length > 0 && (
+        <div className="mt-8 space-y-6">
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              className={`relative ${
+                msg.type === 'user' ? 'ml-auto max-w-[80%]' : 'mr-auto max-w-full'
+              }`}
+            >
+              {msg.isStreaming && (
+                <span className="absolute -left-4 top-0 text-xs text-neutral-500 animate-pulse">●</span>
+              )}
+              {msg.type === 'user' ? (
+                <div className="bg-white/10 border border-white/20 rounded-xl px-4 py-3 text-sm text-white">
+                  {msg.text}
+                </div>
+              ) : (
+                <div className="prose prose-invert prose-sm max-w-none text-neutral-200">
+                  <EnhancedResponse isAnimating={msg.isStreaming}>{msg.text}</EnhancedResponse>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      
+      {/* Conversations Drawer */}
+      <ConversationsDrawer
+        open={isDrawerOpen}
+        onClose={() => setIsDrawerOpen(false)}
+        onSelectConversation={(id) => {
+          navigate(`/ioun-silence/${id}`);
+        }}
+      />
     </div>
   );
 }

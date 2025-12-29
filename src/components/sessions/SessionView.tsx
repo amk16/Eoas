@@ -13,6 +13,7 @@ interface SessionCharacter {
   starting_hp: number;
   current_hp: number;
   max_hp: number;
+  display_art_url?: string | null;
 }
 
 interface DamageEvent {
@@ -305,6 +306,20 @@ export default function SessionView() {
     if (!msOrIso) return '';
     const d = typeof msOrIso === 'number' ? new Date(msOrIso) : new Date(msOrIso);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  // Get character image URL - use display_art_url if available, otherwise placeholder
+  const getCharacterImageUrl = (character: SessionCharacter): string => {
+    if (character.display_art_url) {
+      // If the URL starts with /api, prepend the API base URL
+      if (character.display_art_url.startsWith('/api/')) {
+        const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+        return `${API_URL}${character.display_art_url}`;
+      }
+      return character.display_art_url;
+    }
+    // Placeholder image with character name
+    return `https://via.placeholder.com/512x512/000000/FFFFFF?text=${encodeURIComponent(character.character_name || 'Character')}`;
   };
 
   // Component to display time-based analysis status
@@ -739,23 +754,42 @@ export default function SessionView() {
                     }}
                     className="border border-white/10 rounded-2xl p-4 bg-neutral-950/40 cursor-pointer hover:bg-neutral-950/60 transition-colors"
                   >
-                    <div className="flex justify-between items-center mb-2">
-                      <h3 className="font-medium text-white">{char.character_name}</h3>
-                      <span className="text-sm text-neutral-300">
-                        {char.current_hp} / {char.max_hp} HP
-                      </span>
-                    </div>
-                    <div className="w-full bg-white/10 rounded-full h-2">
-                      <div
-                        className={`h-2 rounded-full ${
-                          hpPercentage > 50
-                            ? 'bg-emerald-400'
-                            : hpPercentage > 25
-                            ? 'bg-amber-400'
-                            : 'bg-red-400'
-                        }`}
-                        style={{ width: `${hpPercentage}%` }}
-                      />
+                    <div className="flex gap-4">
+                      {/* Character Art Image */}
+                      <div className="w-20 h-20 shrink-0 rounded-xl overflow-hidden bg-neutral-900">
+                        <img
+                          src={getCharacterImageUrl(char)}
+                          alt={char.character_name}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            // Fallback if image fails to load
+                            const target = e.target as HTMLImageElement;
+                            target.style.display = 'none';
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Character Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex justify-between items-center mb-2">
+                          <h3 className="font-medium text-white truncate">{char.character_name}</h3>
+                          <span className="text-sm text-neutral-300 shrink-0 ml-2">
+                            {char.current_hp} / {char.max_hp} HP
+                          </span>
+                        </div>
+                        <div className="w-full bg-white/10 rounded-full h-2">
+                          <div
+                            className={`h-2 rounded-full ${
+                              hpPercentage > 50
+                                ? 'bg-emerald-400'
+                                : hpPercentage > 25
+                                ? 'bg-amber-400'
+                                : 'bg-red-400'
+                            }`}
+                            style={{ width: `${hpPercentage}%` }}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 );

@@ -3,6 +3,7 @@ import api from './api';
 export interface IounChatRequest {
   transcript: string;
   voice_id?: string;
+  conversation_id?: string;
 }
 
 export interface IounChatResponse {
@@ -21,12 +22,14 @@ export interface IounChatResponse {
  */
 export async function chatWithIoun(
   transcript: string,
-  voiceId?: string
+  voiceId?: string,
+  conversationId?: string
 ): Promise<IounChatResponse> {
   try {
     const response = await api.post<IounChatResponse>('/ioun/chat', {
       transcript,
       voice_id: voiceId,
+      conversation_id: conversationId,
     });
 
     return response.data;

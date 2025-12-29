@@ -10,6 +10,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 import google.generativeai as genai
 from elevenlabs.client import ElevenLabs
+from ..db.firebase import get_firestore
+from firebase_admin import firestore
 
 load_dotenv()
 
@@ -24,29 +26,128 @@ ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY') or os.getenv('ELEVENLABS_AP
 GEMINI_MODEL = "models/gemini-2.5-flash"
 DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"  # Default Eleven Labs voice (Rachel)
 
-# In-memory conversation history storage (keyed by user_id)
-_conversation_histories: Dict[str, List[Dict[str, str]]] = {}
+# Maximum number of messages to load from history (to avoid token limits)
+MAX_HISTORY_MESSAGES = 50
 
 
-def get_conversation_history(user_id: str) -> List[Dict[str, str]]:
-    """Get conversation history for a user."""
-    return _conversation_histories.get(user_id, [])
+def get_conversation_history(user_id: str, conversation_id: Optional[str] = None) -> List[Dict[str, str]]:
+    """
+    Get conversation history for a user from Firestore.
+    
+    Args:
+        user_id: User ID
+        conversation_id: Optional conversation ID. If provided, loads from that conversation.
+                        If None, returns empty list (new conversation).
+    
+    Returns:
+        List of message dicts with 'role' and 'content' keys
+    """
+    if not conversation_id:
+        logger.info(f"No conversation_id provided for user {user_id}, returning empty history")
+        return []
+    
+    try:
+        db = get_firestore()
+        if not db:
+            logger.warning("Firestore not initialized, returning empty history")
+            return []
+        
+        # Get messages from Firestore subcollection
+        conv_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id)
+        messages_ref = conv_ref.collection('messages')
+        
+        # Order by timestamp ascending and limit to last N messages
+        messages_docs = messages_ref.order_by('timestamp', direction=firestore.Query.ASCENDING).stream()
+        
+        messages = []
+        for doc in messages_docs:
+            msg_data = doc.to_dict()
+            messages.append({
+                'role': msg_data.get('role', 'user'),
+                'content': msg_data.get('content', '')
+            })
+        
+        # Keep only last MAX_HISTORY_MESSAGES to avoid token limits
+        if len(messages) > MAX_HISTORY_MESSAGES:
+            messages = messages[-MAX_HISTORY_MESSAGES:]
+            logger.info(f"Limited conversation history to last {MAX_HISTORY_MESSAGES} messages")
+        
+        logger.info(f"Loaded {len(messages)} messages from conversation {conversation_id} for user {user_id}")
+        return messages
+    except Exception as e:
+        logger.error(f"Error loading conversation history: {e}")
+        return []
 
 
-def add_to_history(user_id: str, role: str, content: str) -> None:
-    """Add a message to conversation history."""
-    if user_id not in _conversation_histories:
-        _conversation_histories[user_id] = []
-    _conversation_histories[user_id].append({"role": role, "content": content})
-    # Keep only last 20 messages to avoid token limits
-    if len(_conversation_histories[user_id]) > 20:
-        _conversation_histories[user_id] = _conversation_histories[user_id][-20:]
+def add_to_history(user_id: str, conversation_id: str, role: str, content: str) -> None:
+    """
+    Add a message to conversation history in Firestore.
+    
+    Args:
+        user_id: User ID
+        conversation_id: Conversation ID
+        role: Message role ('user' or 'assistant')
+        content: Message content
+    """
+    if not conversation_id:
+        logger.warning(f"No conversation_id provided, cannot save message to history")
+        return
+    
+    try:
+        db = get_firestore()
+        if not db:
+            logger.warning("Firestore not initialized, cannot save message to history")
+            return
+        
+        # Verify conversation exists
+        conv_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id)
+        conv_doc = conv_ref.get()
+        
+        if not conv_doc.exists:
+            logger.warning(f"Conversation {conversation_id} does not exist, cannot save message")
+            return
+        
+        # Prepare message data
+        message_data = {
+            'role': role,
+            'content': content,
+            'timestamp': firestore.SERVER_TIMESTAMP,
+        }
+        
+        # Add message to subcollection
+        messages_ref = conv_ref.collection('messages')
+        messages_ref.add(message_data)
+        
+        # Update conversation's last_message_at and updated_at
+        conv_ref.update({
+            'last_message_at': firestore.SERVER_TIMESTAMP,
+            'updated_at': firestore.SERVER_TIMESTAMP,
+        })
+        
+        # Auto-generate title from first user message if title is still default
+        if role == 'user':
+            conv_data = conv_doc.to_dict()
+            if conv_data and conv_data.get('title') == 'New Conversation':
+                # Generate title from first 50 characters of first user message
+                title = content[:50].strip()
+                if len(content) > 50:
+                    title += '...'
+                conv_ref.update({'title': title})
+        
+        logger.info(f"Added {role} message to conversation {conversation_id} for user {user_id}")
+    except Exception as e:
+        logger.error(f"Error saving message to history: {e}")
+        # Don't raise - this is not critical for the chat to work
 
 
-def clear_history(user_id: str) -> None:
-    """Clear conversation history for a user."""
-    if user_id in _conversation_histories:
-        del _conversation_histories[user_id]
+def clear_history(user_id: str, conversation_id: Optional[str] = None) -> None:
+    """
+    Clear conversation history for a user.
+    
+    Note: This function is kept for backward compatibility but doesn't do anything
+    since we're using Firestore. To clear history, delete the conversation.
+    """
+    logger.info(f"clear_history called for user {user_id}, conversation {conversation_id} (no-op with Firestore)")
 
 
 async def chat_with_gemini(
@@ -111,35 +212,41 @@ async def chat_with_gemini(
     return response_text
 
 
-async def generate_narrative_dialogue(response: str) -> str:
+async def generate_narrative_dialogue(transcript: str, system_prompt: str, conversation_history: List[Dict[str, str]], user_id: str) -> str:
     """
-    Generate narrative dialogue version of the response using Gemini.
+    Generate narrative dialogue response from user transcript using Gemini.
     
-    Converts the written response into natural spoken dialogue optimized for TTS.
+    Generates a natural spoken dialogue response optimized for TTS, directly from the user's transcript.
     
     Args:
-        response: The original response text
+        transcript: User's transcript text
+        system_prompt: System prompt for context (same as main response)
+        conversation_history: Previous conversation messages
+        user_id: User ID for logging
     
     Returns:
         Narrative version optimized for speech
     """
     if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY not configured, returning original response")
-        return response
+        logger.warning("GEMINI_API_KEY not configured, returning empty narrative")
+        return ""
     
-    logger.info("Generating narrative dialogue with Gemini")
-    logger.info(f"Response length: {len(response)} characters")
+    logger.info(f"Generating narrative dialogue from transcript for user {user_id}")
+    logger.info(f"Transcript length: {len(transcript)} characters")
+    logger.info(f"History length: {len(conversation_history)} messages")
     
     # Configure Gemini
     genai.configure(api_key=GEMINI_API_KEY)
     
-    # System instruction for narrative conversion
-    narrative_system_instruction = """You are converting written responses into natural spoken dialogue. 
-Make it conversational, easy to listen to, and suitable for text-to-speech. 
-Remove any markdown formatting, code blocks, or complex structures. 
-Keep the meaning and key information, but make it flow naturally when spoken aloud.
-Use natural pauses and conversational phrasing. Avoid reading lists or tables verbatim - instead, 
-describe them in a natural way."""
+    # System instruction for narrative generation - focused on concise spoken responses
+    narrative_system_instruction = f"""{system_prompt}
+
+IMPORTANT: Generate a concise, conversational spoken response optimized for text-to-speech.
+- Keep it under 1000 characters
+- Use natural, conversational phrasing
+- Avoid reading lists or tables verbatim - describe them naturally
+- Make it flow smoothly when spoken aloud
+- Be friendly and engaging"""
     
     # Initialize model with narrative system instruction
     model = genai.GenerativeModel(
@@ -147,17 +254,24 @@ describe them in a natural way."""
         system_instruction=narrative_system_instruction
     )
     
-    # Create prompt for conversion
-    prompt = f"""Convert the following response into natural spoken dialogue. Make it conversational and easy to listen to.
-
-Response to convert:
-{response}"""
+    # Build chat history for Gemini
+    history = []
+    for msg in conversation_history:
+        # Gemini expects 'user' or 'model' as role
+        role = "user" if msg["role"] == "user" else "model"
+        history.append({
+            "role": role,
+            "parts": [msg["content"]]
+        })
     
     # Run synchronous Gemini API call in thread pool
     def generate_sync():
         logger.info("Calling Gemini API for narrative generation...")
-        response_obj = model.generate_content(prompt)
-        return response_obj.text
+        # Start chat with history
+        chat = model.start_chat(history=history)
+        # Send current message
+        response = chat.send_message(transcript)
+        return response.text
     
     loop = asyncio.get_event_loop()
     with ThreadPoolExecutor() as executor:
@@ -167,20 +281,39 @@ Response to convert:
     return narrative_text
 
 
-async def post_process_for_narrative(response: str) -> str:
+async def generate_narrative_from_transcript(
+    transcript: str,
+    system_prompt: str,
+    conversation_history: List[Dict[str, str]],
+    user_id: str
+) -> str:
     """
-    Post-process the display response to create a narrative version optimized for speech.
+    Generate narrative dialogue response from user transcript.
     
-    Uses Gemini to generate natural spoken dialogue from the written response.
+    This is a convenience wrapper around generate_narrative_dialogue().
     
     Args:
-        response: The original response text
+        transcript: User's transcript text
+        system_prompt: System prompt for context
+        conversation_history: Previous conversation messages
+        user_id: User ID for logging
     
     Returns:
         Narrative version optimized for TTS
     """
-    logger.info("Post-processing response for narrative")
-    return await generate_narrative_dialogue(response)
+    return await generate_narrative_dialogue(transcript, system_prompt, conversation_history, user_id)
+
+
+async def post_process_for_narrative(response: str) -> str:
+    """
+    DEPRECATED: This function is kept for backward compatibility but will be replaced.
+    The narrative should now be generated from transcript, not from response.
+    
+    This function will be removed in Phase 2 when the route is updated.
+    """
+    logger.warning("post_process_for_narrative() is deprecated. Narrative should be generated from transcript.")
+    # For now, return empty string - this will be fixed in Phase 2
+    return ""
 
 
 async def generate_tts_audio(

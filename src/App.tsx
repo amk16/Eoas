@@ -13,7 +13,6 @@ import { CharacterEditRedirect, CharacterNewRedirect } from './components/charac
 import SessionList from './components/sessions/SessionList';
 import SessionView from './components/sessions/SessionView';
 import VoiceAssistant from './components/VoiceAssistant';
-import VoiceAssistantV2 from './components/VoiceAssistantV2';
 import SectionShell from './components/layout/SectionShell';
 import { SessionNewRedirect } from './components/sessions/SessionRouteRedirects';
 
@@ -126,22 +125,14 @@ const App = () => {
           
             
           
+         
+         
           <Route
-            path="/voice-assistant"
+            path="/ioun-silence/:conversationId?"
             element={
               <ProtectedRoute>
-                <SectionShell title="Voice Assistant" subtitle="AI-powered D&D assistant">
+                <SectionShell title="Ioun" subtitle="AI-powered D&D assistant with faster silence detection">
                   <VoiceAssistant />
-                </SectionShell>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/ioun"
-            element={
-              <ProtectedRoute>
-                <SectionShell title="Ioun Voice Assistant" subtitle="AI-powered D&D assistant">
-                  <VoiceAssistantV2 />
                 </SectionShell>
               </ProtectedRoute>
             }

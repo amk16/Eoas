@@ -62,3 +62,20 @@ export type DamageEvent = {
   transcript_segment: string | null;
 };
 
+export type Conversation = {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+};
+

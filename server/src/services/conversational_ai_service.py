@@ -179,6 +179,8 @@ def build_system_prompt(
         "- General D&D rules and mechanics",
         "- Game strategies and character builds",
         "",
+        "CRITICAL: Keep all responses to 1000 characters or less. Be concise and direct.",
+        "",
         "IMPORTANT: When the user asks you to modify data (update HP, create sessions, etc.),",
         "you must request confirmation before proceeding. Use the appropriate tool/function",
         "to propose the action, and wait for user confirmation before executing.",

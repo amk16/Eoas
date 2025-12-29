@@ -203,6 +203,7 @@ async def get_session(session_id: str, user_id: str = Depends(authenticate_token
                         'class_name': char_details.get('class_name'),
                         'level': char_details.get('level'),
                         'ac': char_details.get('ac'),
+                        'display_art_url': char_details.get('display_art_url'),
                     })
         
         # Get events from Firestore subcollection
@@ -1130,127 +1131,279 @@ async def reorder_initiative(
 # Phase 2: Get status conditions
 @router.get('/{session_id}/status-conditions')
 async def get_status_conditions(
-    session_id: int,
+    session_id: str,
     user_id: str = Depends(authenticate_token)
 ) -> List[Dict[str, Any]]:
     """Get all active status conditions for a session."""
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Get active status conditions with character names
-        condition_rows = db.execute('''
-            SELECT 
-                asc.*,
-                c.name as character_name
-            FROM active_status_conditions asc
-            JOIN characters c ON asc.character_id = c.id
-            WHERE asc.session_id = ?
-            ORDER BY asc.character_id, asc.condition_name
-        ''', (session_id,)).fetchall()
+        # Try SQLite path for legacy sessions (only if session_id can be converted to int)
+        try:
+            session_id_int = int(session_id)
+            db = get_database()
+            
+            # Verify session exists in SQLite
+            session = db.execute(
+                'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+                (session_id_int, user_id)
+            ).fetchone()
+            
+            if session:
+                # Get active status conditions with character names from SQLite
+                condition_rows = db.execute('''
+                    SELECT 
+                        asc.*,
+                        c.name as character_name
+                    FROM active_status_conditions asc
+                    JOIN characters c ON asc.character_id = c.id
+                    WHERE asc.session_id = ?
+                    ORDER BY asc.character_id, asc.condition_name
+                ''', (session_id_int,)).fetchall()
+                
+                conditions = []
+                for row in condition_rows:
+                    condition_dict = dict(row)
+                    # Check if condition has expired
+                    if condition_dict.get('expires_at'):
+                        import datetime
+                        expires_at = datetime.datetime.fromisoformat(condition_dict['expires_at'])
+                        if datetime.datetime.now() > expires_at:
+                            # Condition has expired, remove it
+                            db.execute(
+                                '''DELETE FROM active_status_conditions 
+                                   WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+                                (session_id_int, condition_dict['character_id'], condition_dict['condition_name'])
+                            )
+                            continue
+                    conditions.append(condition_dict)
+                
+                db.commit()
+                return conditions
+        except (ValueError, TypeError):
+            # Session ID is a Firestore string - derive active conditions from events
+            pass
         
+        # Firestore path: derive active status conditions from events
+        events_ref = session_ref.collection('events')
+        events_docs = events_ref.stream()
+        
+        # Track active conditions by processing events in chronological order
+        active_conditions: Dict[str, Dict[str, Any]] = {}  # key: f"{character_id}:{condition_name}"
+        
+        all_events = []
+        for doc in events_docs:
+            event_data = doc.to_dict()
+            event_type = event_data.get('type', '')
+            all_events.append(event_data)
+        
+        # Sort events by timestamp (oldest first)
+        all_events.sort(key=lambda x: x.get('timestamp', ''))
+        
+        for event in all_events:
+            event_type = event.get('type', '')
+            if event_type == 'status_condition_applied':
+                character_id = str(event.get('character_id', ''))
+                condition_name = event.get('condition_name', '')
+                key = f"{character_id}:{condition_name}"
+                
+                # Convert character_id to int if possible (for consistency with SQLite format)
+                try:
+                    character_id_int = int(character_id)
+                except (ValueError, TypeError):
+                    character_id_int = character_id
+                
+                active_conditions[key] = {
+                    'character_id': character_id_int,
+                    'condition_name': condition_name,
+                    'character_name': event.get('character_name', 'Unknown'),
+                    'applied_at': event.get('timestamp', ''),
+                    'duration_minutes': event.get('duration_minutes'),
+                    'expires_at': None
+                }
+                
+                # Calculate expiration if duration is provided
+                if event.get('duration_minutes'):
+                    import datetime
+                    timestamp_str = event.get('timestamp', '')
+                    if timestamp_str:
+                        try:
+                            applied_at = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            expires_at = applied_at + datetime.timedelta(minutes=event['duration_minutes'])
+                            active_conditions[key]['expires_at'] = expires_at.isoformat()
+                        except (ValueError, TypeError):
+                            pass
+                            
+            elif event_type == 'status_condition_removed':
+                character_id = str(event.get('character_id', ''))
+                condition_name = event.get('condition_name', '')
+                key = f"{character_id}:{condition_name}"
+                if key in active_conditions:
+                    del active_conditions[key]
+        
+        # Filter out expired conditions
+        import datetime
+        current_time = datetime.datetime.now()
         conditions = []
-        for row in condition_rows:
-            condition_dict = dict(row)
-            # Check if condition has expired
-            if condition_dict.get('expires_at'):
-                import datetime
-                expires_at = datetime.datetime.fromisoformat(condition_dict['expires_at'])
-                if datetime.datetime.now() > expires_at:
-                    # Condition has expired, remove it
-                    db.execute(
-                        '''DELETE FROM active_status_conditions 
-                           WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
-                        (session_id, condition_dict['character_id'], condition_dict['condition_name'])
-                    )
-                    continue
-            conditions.append(condition_dict)
+        for key, condition in active_conditions.items():
+            if condition.get('expires_at'):
+                try:
+                    expires_at = datetime.datetime.fromisoformat(condition['expires_at'].replace('Z', '+00:00'))
+                    if current_time > expires_at:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            conditions.append(condition)
         
-        db.commit()
         return conditions
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching status conditions: {e}')
+        logger.error(f'Error fetching status conditions: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
 # Phase 2: Remove status condition
 @router.post('/{session_id}/status-conditions/remove')
 async def remove_status_condition(
-    session_id: int,
+    session_id: str,
     request: StatusConditionRemoveRequest,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Manually remove a status condition from a character."""
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, request.character_id)
-        ).fetchone()
+        character_id_str = str(request.character_id)
         
-        if not session_character:
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id_str)
+        session_character_doc = session_character_ref.get()
+        
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
-        # Check if condition exists
-        condition = db.execute(
-            '''SELECT * FROM active_status_conditions 
-               WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
-            (session_id, request.character_id, request.condition_name)
-        ).fetchone()
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id_str)
+        character_doc = character_ref.get()
+        character_name = 'Unknown'
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', 'Unknown')
         
-        if not condition:
-            raise HTTPException(
-                status_code=404,
-                detail='Status condition not found'
-            )
+        # Try SQLite path for legacy sessions (only if session_id can be converted to int)
+        try:
+            session_id_int = int(session_id)
+            character_id_int = int(request.character_id)
+            db = get_database()
+            
+            # Check if session exists in SQLite
+            session = db.execute(
+                'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+                (session_id_int, user_id)
+            ).fetchone()
+            
+            if session:
+                # Verify character is in the session in SQLite
+                session_character = db.execute(
+                    'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+                    (session_id_int, character_id_int)
+                ).fetchone()
+                
+                if not session_character:
+                    raise HTTPException(
+                        status_code=400,
+                        detail='Character is not in this session'
+                    )
+                
+                # Check if condition exists
+                condition = db.execute(
+                    '''SELECT * FROM active_status_conditions 
+                       WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+                    (session_id_int, character_id_int, request.condition_name)
+                ).fetchone()
+                
+                if not condition:
+                    raise HTTPException(
+                        status_code=404,
+                        detail='Status condition not found'
+                    )
+                
+                # Insert removal event
+                db.execute(
+                    '''INSERT INTO status_condition_events 
+                       (session_id, character_id, condition_name, action, transcript_segment)
+                       VALUES (?, ?, ?, ?, ?)''',
+                    (
+                        session_id_int,
+                        character_id_int,
+                        request.condition_name,
+                        'removed',
+                        f'Manually removed by user'
+                    )
+                )
+                
+                # Remove from active status conditions
+                db.execute(
+                    '''DELETE FROM active_status_conditions 
+                       WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+                    (session_id_int, character_id_int, request.condition_name)
+                )
+                
+                db.commit()
+                
+                return {
+                    'message': 'Status condition removed successfully',
+                    'character_id': request.character_id,
+                    'condition_name': request.condition_name
+                }
+        except (ValueError, TypeError):
+            # Session ID is a Firestore string - create removal event in Firestore
+            pass
         
-        # Insert removal event
-        db.execute(
-            '''INSERT INTO status_condition_events 
-               (session_id, character_id, condition_name, action, transcript_segment)
-               VALUES (?, ?, ?, ?, ?)''',
-            (
-                session_id,
-                request.character_id,
-                request.condition_name,
-                'removed',
-                f'Manually removed by user'
-            )
+        # Firestore path: create a status_condition_removed event
+        from ..services.event_types import save_event_to_firestore
+        from datetime import datetime
+        
+        event_data = {
+            'type': 'status_condition_removed',
+            'character_id': request.character_id,
+            'character_name': character_name,
+            'condition_name': request.condition_name,
+            'transcript_segment': 'Manually removed by user'
+        }
+        
+        saved_event = save_event_to_firestore(
+            session_ref,
+            'status_condition_removed',
+            event_data,
+            character_id_str,
+            character_name
         )
-        
-        # Remove from active status conditions
-        db.execute(
-            '''DELETE FROM active_status_conditions 
-               WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
-            (session_id, request.character_id, request.condition_name)
-        )
-        
-        db.commit()
         
         return {
             'message': 'Status condition removed successfully',
@@ -1261,9 +1414,7 @@ async def remove_status_condition(
     except HTTPException:
         raise
     except Exception as e:
-        db = get_database()
-        db.rollback()
-        print(f'Error removing status condition: {e}')
+        logger.error(f'Error removing status condition: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1339,8 +1490,8 @@ async def get_buffs_debuffs(
 # Phase 3: Get active buffs/debuffs for a specific character
 @router.get('/{session_id}/characters/{character_id}/buffs-debuffs')
 async def get_character_buffs_debuffs(
-    session_id: int,
-    character_id: int,
+    session_id: str,
+    character_id: str,
     user_id: str = Depends(authenticate_token)
 ) -> List[Dict[str, Any]]:
     """Get all active buffs/debuffs for a specific character in a session."""
@@ -1348,73 +1499,190 @@ async def get_character_buffs_debuffs(
     import datetime
     
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, character_id)
-        ).fetchone()
+        character_id_str = str(character_id)
         
-        if not session_character:
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id_str)
+        session_character_doc = session_character_ref.get()
+        
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
-        # Get active buffs/debuffs for this character
-        effect_rows = db.execute('''
-            SELECT 
-                abd.*,
-                c.name as character_name
-            FROM active_buff_debuffs abd
-            JOIN characters c ON abd.character_id = c.id
-            WHERE abd.session_id = ? AND abd.character_id = ?
-            ORDER BY abd.effect_name
-        ''', (session_id, character_id)).fetchall()
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id_str)
+        character_doc = character_ref.get()
+        character_name = 'Unknown'
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', 'Unknown')
         
-        effects = []
-        for row in effect_rows:
-            effect_dict = dict(row)
-            # Parse stat_modifications JSON
-            if effect_dict.get('stat_modifications'):
-                effect_dict['stat_modifications'] = json.loads(effect_dict['stat_modifications'])
-            else:
-                effect_dict['stat_modifications'] = {}
+        # Try SQLite path for legacy sessions (only if session_id and character_id can be converted to int)
+        try:
+            session_id_int = int(session_id)
+            character_id_int = int(character_id)
+            db = get_database()
             
-            # Check if effect has expired
-            if effect_dict.get('expires_at'):
-                expires_at_str = effect_dict['expires_at']
-                if isinstance(expires_at_str, str):
-                    expires_at = datetime.datetime.fromisoformat(expires_at_str.replace(' ', 'T'))
-                else:
-                    expires_at = expires_at_str
-                if datetime.datetime.now() > expires_at:
-                    # Effect has expired, remove it
-                    db.execute(
-                        '''DELETE FROM active_buff_debuffs 
-                           WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
-                        (session_id, character_id, effect_dict['effect_name'])
+            # Check if session exists in SQLite
+            session = db.execute(
+                'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+                (session_id_int, user_id)
+            ).fetchone()
+            
+            if session:
+                # Verify character is in the session in SQLite
+                session_character = db.execute(
+                    'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+                    (session_id_int, character_id_int)
+                ).fetchone()
+                
+                if not session_character:
+                    raise HTTPException(
+                        status_code=400,
+                        detail='Character is not in this session'
                     )
-                    continue
-            effects.append(effect_dict)
+                
+                # Get active buffs/debuffs for this character from SQLite
+                effect_rows = db.execute('''
+                    SELECT 
+                        abd.*,
+                        c.name as character_name
+                    FROM active_buff_debuffs abd
+                    JOIN characters c ON abd.character_id = c.id
+                    WHERE abd.session_id = ? AND abd.character_id = ?
+                    ORDER BY abd.effect_name
+                ''', (session_id_int, character_id_int)).fetchall()
+                
+                effects = []
+                for row in effect_rows:
+                    effect_dict = dict(row)
+                    # Parse stat_modifications JSON
+                    if effect_dict.get('stat_modifications'):
+                        effect_dict['stat_modifications'] = json.loads(effect_dict['stat_modifications'])
+                    else:
+                        effect_dict['stat_modifications'] = {}
+                    
+                    # Check if effect has expired
+                    if effect_dict.get('expires_at'):
+                        expires_at_str = effect_dict['expires_at']
+                        if isinstance(expires_at_str, str):
+                            expires_at = datetime.datetime.fromisoformat(expires_at_str.replace(' ', 'T'))
+                        else:
+                            expires_at = expires_at_str
+                        if datetime.datetime.now() > expires_at:
+                            # Effect has expired, remove it
+                            db.execute(
+                                '''DELETE FROM active_buff_debuffs 
+                                   WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                                (session_id_int, character_id_int, effect_dict['effect_name'])
+                            )
+                            continue
+                    effects.append(effect_dict)
+                
+                db.commit()
+                return effects
+        except (ValueError, TypeError):
+            # Session ID or character ID is a Firestore string - derive active effects from events
+            pass
         
-        db.commit()
+        # Firestore path: derive active buffs/debuffs from events
+        events_ref = session_ref.collection('events')
+        events_docs = events_ref.stream()
+        
+        # Track active effects by processing events in chronological order
+        active_effects: Dict[str, Dict[str, Any]] = {}  # key: f"{character_id}:{effect_name}"
+        
+        all_events = []
+        for doc in events_docs:
+            event_data = doc.to_dict()
+            event_data['id'] = doc.id
+            all_events.append(event_data)
+        
+        # Sort events by timestamp (oldest first)
+        all_events.sort(key=lambda x: x.get('timestamp', ''))
+        
+        for event in all_events:
+            event_type = event.get('type', '')
+            event_character_id = str(event.get('character_id', ''))
+            
+            # Only process events for this character
+            if event_character_id != character_id_str:
+                continue
+                
+            if event_type == 'buff_debuff_applied':
+                effect_name = event.get('effect_name', '')
+                key = f"{character_id_str}:{effect_name}"
+                
+                # Convert character_id to int if possible (for consistency with SQLite format)
+                try:
+                    character_id_int = int(character_id_str)
+                except (ValueError, TypeError):
+                    character_id_int = character_id_str
+                
+                active_effects[key] = {
+                    'session_id': int(session_id) if session_id.isdigit() else session_id,
+                    'character_id': character_id_int,
+                    'effect_name': effect_name,
+                    'effect_type': event.get('effect_type', 'buff'),
+                    'character_name': character_name,
+                    'stat_modifications': event.get('stat_modifications', {}),
+                    'stacking_rule': event.get('stacking_rule', ''),
+                    'applied_at': event.get('timestamp', ''),
+                    'duration_minutes': event.get('duration_minutes'),
+                    'expires_at': None,
+                    'source': event.get('source')
+                }
+                
+                # Calculate expiration if duration is provided
+                if event.get('duration_minutes'):
+                    timestamp_str = event.get('timestamp', '')
+                    if timestamp_str:
+                        try:
+                            applied_at = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                            expires_at = applied_at + datetime.timedelta(minutes=event['duration_minutes'])
+                            active_effects[key]['expires_at'] = expires_at.isoformat()
+                        except (ValueError, TypeError):
+                            pass
+                            
+            elif event_type == 'buff_debuff_removed':
+                effect_name = event.get('effect_name', '')
+                key = f"{character_id_str}:{effect_name}"
+                if key in active_effects:
+                    del active_effects[key]
+        
+        # Filter out expired effects
+        current_time = datetime.datetime.now()
+        effects = []
+        for key, effect in active_effects.items():
+            if effect.get('expires_at'):
+                try:
+                    expires_at = datetime.datetime.fromisoformat(effect['expires_at'].replace('Z', '+00:00'))
+                    if current_time > expires_at:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+            effects.append(effect)
+        
         return effects
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching character buffs/debuffs: {e}')
+        logger.error(f'Error fetching character buffs/debuffs: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1575,63 +1843,134 @@ async def get_spell_slots(
 # Phase 4: Get spell slot usage for a specific character
 @router.get('/{session_id}/characters/{character_id}/spell-slots')
 async def get_character_spell_slots(
-    session_id: int,
-    character_id: int,
+    session_id: str,
+    character_id: str,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Get spell slot usage for a specific character in a session."""
     try:
-        db = get_database()
+        # Verify session belongs to user in Firestore
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, character_id)
-        ).fetchone()
+        character_id_str = str(character_id)
         
-        if not session_character:
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id_str)
+        session_character_doc = session_character_ref.get()
+        
+        if not session_character_doc.exists:
             raise HTTPException(status_code=404, detail='Character not found in session')
         
         # Get character name
-        character = db.execute(
-            'SELECT name FROM characters WHERE id = ?',
-            (character_id,)
-        ).fetchone()
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id_str)
+        character_doc = character_ref.get()
         
-        if not character:
+        if not character_doc.exists:
             raise HTTPException(status_code=404, detail='Character not found')
         
-        # Get spell slot usage
-        slot_rows = db.execute('''
-            SELECT spell_level, slots_used
-            FROM character_spell_slots
-            WHERE session_id = ? AND character_id = ?
-            ORDER BY spell_level
-        ''', (session_id, character_id)).fetchall()
+        character_data = character_doc.to_dict()
+        character_name = character_data.get('name', 'Unknown')
         
-        slots_by_level = {}
-        for row in slot_rows:
-            slots_by_level[str(row['spell_level'])] = row['slots_used']
+        # Try SQLite path for legacy sessions (only if session_id and character_id can be converted to int)
+        try:
+            session_id_int = int(session_id)
+            character_id_int = int(character_id)
+            db = get_database()
+            
+            # Check if session exists in SQLite
+            session = db.execute(
+                'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
+                (session_id_int, user_id)
+            ).fetchone()
+            
+            if session:
+                # Verify character is in the session in SQLite
+                session_character = db.execute(
+                    'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
+                    (session_id_int, character_id_int)
+                ).fetchone()
+                
+                if session_character:
+                    # Get character name from SQLite
+                    character = db.execute(
+                        'SELECT name FROM characters WHERE id = ?',
+                        (character_id_int,)
+                    ).fetchone()
+                    
+                    if character:
+                        character_name = character['name']
+                    
+                    # Get spell slot usage from SQLite
+                    slot_rows = db.execute('''
+                        SELECT spell_level, slots_used
+                        FROM character_spell_slots
+                        WHERE session_id = ? AND character_id = ?
+                        ORDER BY spell_level
+                    ''', (session_id_int, character_id_int)).fetchall()
+                    
+                    slots_by_level = {}
+                    for row in slot_rows:
+                        slots_by_level[str(row['spell_level'])] = row['slots_used']
+                    
+                    # Convert character_id to int if possible (for consistency with SQLite format)
+                    try:
+                        character_id_int = int(character_id_str)
+                    except (ValueError, TypeError):
+                        character_id_int = character_id_str
+                    
+                    return {
+                        'character_id': character_id_int,
+                        'character_name': character_name,
+                        'slots_by_level': slots_by_level
+                    }
+        except (ValueError, TypeError):
+            # Session ID or character ID is a Firestore string - derive spell slot usage from events
+            pass
+        
+        # Firestore path: derive spell slot usage from spell_cast events
+        events_ref = session_ref.collection('events')
+        events_docs = events_ref.stream()
+        
+        # Track spell slot usage by level
+        slots_by_level: Dict[str, int] = {}
+        
+        for doc in events_docs:
+            event_data = doc.to_dict()
+            event_type = event_data.get('type', '')
+            event_character_id = str(event_data.get('character_id', ''))
+            
+            # Only process spell_cast events for this character
+            if event_type == 'spell_cast' and event_character_id == character_id_str:
+                spell_level = event_data.get('spell_level', 0)
+                if spell_level:
+                    level_key = str(spell_level)
+                    slots_by_level[level_key] = slots_by_level.get(level_key, 0) + 1
+        
+        # Convert character_id to int if possible (for consistency with SQLite format)
+        try:
+            character_id_int = int(character_id_str)
+        except (ValueError, TypeError):
+            character_id_int = character_id_str
         
         return {
-            'character_id': character_id,
-            'character_name': character['name'],
+            'character_id': character_id_int,
+            'character_name': character_name,
             'slots_by_level': slots_by_level
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching character spell slots: {e}')
+        logger.error(f'Error fetching character spell slots: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 

@@ -56,16 +56,10 @@ export default function CharacterDetailSidebar({
 
   useEffect(() => {
     if (isOpen && characterId) {
+      // Only fetch when sidebar opens/character is selected, not on constant polling
       fetchConditions();
       fetchBuffsDebuffs();
       fetchSpellSlots();
-      // Poll for updates every 3 seconds when open
-      const interval = setInterval(() => {
-        fetchConditions();
-        fetchBuffsDebuffs();
-        fetchSpellSlots();
-      }, 3000);
-      return () => clearInterval(interval);
     } else {
       setConditions([]);
       setBuffsDebuffs([]);
