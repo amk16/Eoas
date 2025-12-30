@@ -5,9 +5,10 @@ import { chatWithIoun } from '../services/iounService';
 import { useAuth } from '../context/AuthContext';
 import { getPulseDuration, getGlowIntensity, getSpinDuration, STATE_COLORS, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
 import { generateIdleSegments } from './voice-assistant/arcUtils';
+import { IDLE_HINT_CONFIG } from './voice-assistant/idleHintConfig';
 import LiveScribeSilence from './LiveScribeSilence';
 import ConversationsDrawer from './conversations/ConversationsDrawer';
-import { createConversation, getConversation, addMessage } from '../services/conversationService';
+import { createConversation, getConversation } from '../services/conversationService';
 import type { Conversation, ConversationMessage } from '../types';
 
 interface ChatMessage {
@@ -31,7 +32,8 @@ export default function VoiceAssistant() {
   const [isEndingConversation, setIsEndingConversation] = useState(false);
   
   // Conversation management
-  const [currentConversationId, setCurrentConversationId] = useState<string | null>(urlConversationId || null);
+  // Always start with null on mount - will be set by URL param effect if needed (but not on refresh)
+  const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
@@ -62,17 +64,67 @@ export default function VoiceAssistant() {
   // Conversation history (kept for backward compatibility, but now managed via Firestore)
   const conversationHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   
-  // Load conversation from URL param on mount
+  // Track if this is the initial mount (page refresh) - use state to prevent rendering
+  const [isInitializing, setIsInitializing] = useState(true);
+  const isInitialMountRef = useRef(true);
+  
+  // On page refresh/mount: clear state and navigate to base URL
   useEffect(() => {
+    // Mark that we're on initial mount FIRST to prevent URL param effect from running
+    isInitialMountRef.current = true;
+    
+    // Clear all state on initial mount (page refresh)
+    setMessages([]);
+    setError('');
+    setCurrentConversationId(null);
+    setCurrentConversation(null);
+    setIsScribeActive(false);
+    setIsProcessing(false);
+    
+    // Clear refs
+    conversationHistoryRef.current = [];
+    accumulatedTranscriptRef.current = '';
+    lastCommittedTranscriptRef.current = '';
+    recentTranscriptsRef.current = [];
+    processedSilenceTranscriptRef.current = '';
+    isProcessingRef.current = false;
+    pendingSilenceTriggerRef.current = false;
+    
+    // Navigate to base URL immediately
+    navigate('/ioun-silence', { replace: true });
+    
+    // Mark initialization complete after navigation settles
+    // This prevents any flash by ensuring we don't render messages during init
+    setTimeout(() => {
+      isInitialMountRef.current = false;
+      setIsInitializing(false);
+      console.log('[VoiceAssistant] Page refreshed - state cleared, navigated to base URL');
+    }, 50);
+  }, []); // Empty dependency array - runs only on mount
+  
+  // Load conversation from URL param (skip on initial mount/refresh)
+  useEffect(() => {
+    // Skip on initial mount - we've already cleared state and navigated to base
+    // This prevents any loading/flashing during page refresh
+    if (isInitialMountRef.current) {
+      return;
+    }
+    
+    // Only process URL changes after initial mount
     if (urlConversationId && urlConversationId !== currentConversationId) {
+      // URL has a conversation ID that's different from current - load it
       loadConversation(urlConversationId);
     } else if (!urlConversationId && currentConversationId) {
-      // URL changed to remove conversation ID - clear current conversation
+      // URL has no conversation ID but we have one in state
+      // This happens when user navigates to base route - clear conversation state
+      // Note: We don't check isProcessing/isScribeActive here because navigation
+      // to base route is an explicit action (e.g., "New Chat" button)
       setCurrentConversationId(null);
       setCurrentConversation(null);
       setMessages([]);
     }
-  }, [urlConversationId]);
+    // Note: We don't include currentConversationId in deps to avoid triggering on mount state changes
+  }, [urlConversationId]); // Only depend on URL param, not currentConversationId
   
   const loadConversation = async (conversationId: string) => {
     try {
@@ -127,15 +179,14 @@ export default function VoiceAssistant() {
       clearSilenceTimer();
       stopTTSAudio();
       
-      // Create new conversation
-      const newConversation = await createConversation();
-      setCurrentConversationId(newConversation.id);
-      setCurrentConversation(newConversation);
-      navigate(`/ioun-silence/${newConversation.id}`);
-      console.log(`[VoiceAssistant] Started new conversation: ${newConversation.id}`);
+      // Clear conversation state - new conversation will be created on first transcript
+      setCurrentConversationId(null);
+      setCurrentConversation(null);
+      navigate('/ioun-silence');
+      console.log('[VoiceAssistant] Cleared conversation state - ready for new conversation');
     } catch (err: any) {
-      console.error('Error creating conversation:', err);
-      const errorMessage = err.message || 'Failed to create conversation';
+      console.error('Error clearing conversation:', err);
+      const errorMessage = err.message || 'Failed to clear conversation';
       setError(errorMessage);
     }
   };
@@ -198,18 +249,17 @@ export default function VoiceAssistant() {
         setCurrentConversationId(conversationId);
         setCurrentConversation(newConversation);
         navigate(`/ioun-silence/${conversationId}`);
+        console.log(`[VoiceAssistant] Created new conversation: ${conversationId}`);
       }
       
-      // Save user message to Firestore
-      if (conversationId) {
-        try {
-          await addMessage(conversationId, 'user', transcript);
-          console.log(`[VoiceAssistant] Saved user message to conversation ${conversationId}`);
-        } catch (err) {
-          console.error('Error saving user message:', err);
-          // Continue even if save fails - don't block the conversation
-        }
+      // Defensive check: Ensure conversationId is set before proceeding
+      if (!conversationId) {
+        console.error('[VoiceAssistant] No conversation ID available after creation attempt');
+        throw new Error('Failed to create or retrieve conversation');
       }
+      
+      // Note: Messages are saved by the backend via add_to_history in ioun.py
+      // No need to save here to avoid duplicates
       
       const response = await chatWithIoun(transcript, undefined, conversationId);
       
@@ -236,18 +286,8 @@ export default function VoiceAssistant() {
       conversationHistoryRef.current.push({ role: 'user', content: transcript });
       conversationHistoryRef.current.push({ role: 'assistant', content: response.response });
       
-      // Save assistant message to Firestore
-      if (conversationId) {
-        try {
-          await addMessage(conversationId, 'assistant', response.response);
-          console.log(`[VoiceAssistant] Saved assistant message to conversation ${conversationId}`);
-        } catch (err) {
-          console.error('Error saving assistant message:', err);
-          // Continue even if save fails - don't block the conversation
-          // Show a non-blocking warning
-          console.warn('[VoiceAssistant] Message may not have been saved to conversation history');
-        }
-      }
+      // Note: Messages are saved by the backend via add_to_history in ioun.py
+      // No need to save here to avoid duplicates
       
       // Clear accumulated transcript
       accumulatedTranscriptRef.current = '';
@@ -392,12 +432,12 @@ export default function VoiceAssistant() {
       
       const totalEndAnimationTime = END_CONVERSATION_ANIMATION_TIMING.step1_dashesFade;
       setTimeout(() => {
-        setMessages([]);
-        conversationHistoryRef.current = [];
+        // Keep messages and conversation history visible - don't clear state
+        // Only clear the accumulated transcript buffer for the next session
         accumulatedTranscriptRef.current = '';
         setIsEndingConversation(false);
         setIsStarting(false);
-        // Don't clear conversation - user might want to continue it later
+        // Don't clear conversation or messages - user might want to continue it later
       }, totalEndAnimationTime * 1000);
     } catch (err: any) {
       setError(err.message || 'Failed to stop');
@@ -563,8 +603,15 @@ export default function VoiceAssistant() {
         </div>
       </div>
 
+      {/* Idle State Hint */}
+      {!isInitializing && messages.length === 0 && !isConnected && !isConnecting && !isProcessing && !isScribeActive && (
+        <div className={IDLE_HINT_CONFIG.className}>
+          {IDLE_HINT_CONFIG.text}
+        </div>
+      )}
+
       {/* Messages */}
-      {messages.length > 0 && (
+      {!isInitializing && messages.length > 0 && (
         <div className="mt-8 space-y-6">
           {messages.map((msg) => (
             <div

@@ -5,10 +5,12 @@ import LiveScribe from '../LiveScribe';
 import { analyzeTranscript } from '../../services/analyzeService';
 import InitiativeTracker from './InitiativeTracker';
 import CharacterDetailSidebar from './CharacterDetailSidebar';
+import HealthEditModal from './HealthEditModal';
+import EventCreationModal from './EventCreationModal';
 
 interface SessionCharacter {
   session_id: number;
-  character_id: number;
+  character_id: number | string;  // Can be string (Firestore) or number (legacy)
   character_name: string;
   starting_hp: number;
   current_hp: number;
@@ -28,6 +30,8 @@ interface DamageEvent {
   initiative_value?: number;
   round_number?: number;
   condition_name?: string;
+  effect_name?: string;
+  effect_type?: 'buff' | 'debuff';
   timestamp: string;
   transcript_segment?: string | null;
 }
@@ -82,6 +86,16 @@ export default function SessionView() {
   const [selectedCharacterId, setSelectedCharacterId] = useState<number | null>(null);
   const [selectedCharacterName, setSelectedCharacterName] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  
+  // Event deletion state
+  const [deletingEventId, setDeletingEventId] = useState<string | number | null>(null);
+  const [eventToDelete, setEventToDelete] = useState<DamageEvent | null>(null);
+  
+  // Health editing state
+  const [healthEditCharacter, setHealthEditCharacter] = useState<SessionCharacter | null>(null);
+  
+  // Event creation state
+  const [isEventCreationModalOpen, setIsEventCreationModalOpen] = useState(false);
   
   // Phase 1: Buffer for accumulating transcript with time-based analysis
   const transcriptBufferRef = useRef<string>('');
@@ -306,6 +320,65 @@ export default function SessionView() {
     if (!msOrIso) return '';
     const d = typeof msOrIso === 'number' ? new Date(msOrIso) : new Date(msOrIso);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  const handleDeleteEvent = async (event: DamageEvent) => {
+    if (!id) return;
+    
+    try {
+      setDeletingEventId(event.id);
+      await api.delete(`/sessions/${id}/events/${event.id}`);
+      
+      // Refresh session data to reflect changes
+      await fetchSession({ mode: 'refresh' });
+      
+      // Close confirmation dialog if open
+      setEventToDelete(null);
+    } catch (err: any) {
+      console.error('Failed to delete event:', err);
+      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to delete event');
+    } finally {
+      setDeletingEventId(null);
+    }
+  };
+
+  const handleDeleteClick = (event: DamageEvent) => {
+    setEventToDelete(event);
+  };
+
+  const handleCancelDelete = () => {
+    setEventToDelete(null);
+  };
+
+  const getEventDescription = (event: DamageEvent): string => {
+    if (event.type === 'damage' || event.type === 'healing') {
+      return `${event.character_name || 'Unknown'} ${event.type === 'damage' ? 'took' : 'received'} ${event.amount} ${event.type === 'damage' ? 'damage' : 'healing'}`;
+    } else if (event.type === 'spell_cast') {
+      return `${event.character_name || 'Unknown'} cast ${event.spell_name}${event.spell_level !== undefined && event.spell_level > 0 ? ` (level ${event.spell_level})` : ''}`;
+    } else if (event.type === 'initiative_roll') {
+      return `${event.character_name || 'Unknown'} rolled initiative: ${event.initiative_value}`;
+    } else if (event.type === 'status_condition_applied') {
+      return `${event.character_name || 'Unknown'} had ${event.condition_name} applied`;
+    } else if (event.type === 'status_condition_removed') {
+      return `${event.character_name || 'Unknown'} had ${event.condition_name} removed`;
+    } else if (event.type === 'buff_debuff_applied' || event.type === 'buff_debuff_removed') {
+      const effectName = event.effect_name ? ` ${event.effect_name}` : ' effect';
+      return `${event.character_name || 'Unknown'} ${event.type === 'buff_debuff_applied' ? 'gained' : 'lost'}${effectName}`;
+    } else {
+      return `${event.type} event`;
+    }
+  };
+
+  const handleOpenHealthEdit = (character: SessionCharacter) => {
+    setHealthEditCharacter(character);
+  };
+
+  const handleCloseHealthEdit = () => {
+    setHealthEditCharacter(null);
+  };
+
+  const handleHealthEditSave = async () => {
+    await fetchSession({ mode: 'refresh' });
   };
 
   // Get character image URL - use display_art_url if available, otherwise placeholder
@@ -730,6 +803,7 @@ export default function SessionView() {
           <InitiativeTracker 
             sessionId={id} 
             onUpdate={() => fetchSession({ mode: 'refresh' })}
+            refreshKey={session.events.length} // Refresh when events change
           />
         </div>
       )}
@@ -773,9 +847,34 @@ export default function SessionView() {
                       <div className="flex-1 min-w-0">
                         <div className="flex justify-between items-center mb-2">
                           <h3 className="font-medium text-white truncate">{char.character_name}</h3>
-                          <span className="text-sm text-neutral-300 shrink-0 ml-2">
-                            {char.current_hp} / {char.max_hp} HP
-                          </span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-sm text-neutral-300">
+                              {char.current_hp} / {char.max_hp} HP
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenHealthEdit(char);
+                              }}
+                              className="p-1 hover:bg-white/10 rounded transition-colors text-neutral-400 hover:text-white"
+                              title="Edit HP"
+                              aria-label="Edit HP"
+                            >
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                              </svg>
+                            </button>
+                          </div>
                         </div>
                         <div className="w-full bg-white/10 rounded-full h-2">
                           <div
@@ -800,7 +899,17 @@ export default function SessionView() {
 
         {/* Events */}
         <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-6">
-          <h2 className="text-xl font-semibold text-white mb-4">Event History</h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-white">Event History</h2>
+            {session.status === 'active' && (
+              <button
+                onClick={() => setIsEventCreationModalOpen(true)}
+                className="px-3 py-2 bg-blue-500/15 text-blue-200 border border-blue-500/30 rounded-xl hover:bg-blue-500/20 transition-colors text-sm font-medium"
+              >
+                Create Event
+              </button>
+            )}
+          </div>
           {session.events.length === 0 ? (
             <p className="text-neutral-300">No events yet</p>
           ) : (
@@ -819,7 +928,7 @@ export default function SessionView() {
                   }`}
                 >
                   <div className="flex justify-between items-start">
-                    <div>
+                    <div className="flex-1">
                       <span className="font-medium text-white">
                         {event.character_name || 'Unknown'}
                       </span>
@@ -869,9 +978,31 @@ export default function SessionView() {
                         </span>
                       )}
                     </div>
-                    <span className="text-xs text-neutral-400">
-                      {formatDate(event.timestamp)}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-neutral-400">
+                        {formatDate(event.timestamp)}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteClick(event)}
+                        disabled={deletingEventId === event.id}
+                        className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-white hover:text-white/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Delete event"
+                        aria-label="Delete event"
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                   {event.transcript_segment && (
                     <p className="text-sm text-neutral-300 mt-1 italic">
@@ -884,6 +1015,33 @@ export default function SessionView() {
           )}
         </div>
       </div>
+
+      {/* Health Edit Modal */}
+      {healthEditCharacter && id && (
+        <HealthEditModal
+          isOpen={true}
+          onClose={handleCloseHealthEdit}
+          characterId={healthEditCharacter.character_id}
+          characterName={healthEditCharacter.character_name}
+          currentHp={healthEditCharacter.current_hp}
+          maxHp={healthEditCharacter.max_hp}
+          sessionId={id}
+          onSave={handleHealthEditSave}
+        />
+      )}
+
+      {/* Event Creation Modal */}
+      {isEventCreationModalOpen && id && session && (
+        <EventCreationModal
+          isOpen={isEventCreationModalOpen}
+          onClose={() => setIsEventCreationModalOpen(false)}
+          sessionId={id}
+          characters={session.characters}
+          onEventCreated={async () => {
+            await fetchSession({ mode: 'refresh' });
+          }}
+        />
+      )}
 
       {/* Phase 2: Character Detail Sidebar */}
       {session.status === 'active' && id && (
@@ -899,6 +1057,61 @@ export default function SessionView() {
           }}
           onUpdate={() => fetchSession({ mode: 'refresh' })}
         />
+      )}
+
+      {/* Event Deletion Confirmation Dialog */}
+      {eventToDelete && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/50 z-50 transition-opacity"
+            onClick={handleCancelDelete}
+            aria-hidden="true"
+          />
+          
+          {/* Dialog */}
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-md w-full">
+              <h3 className="text-xl font-semibold text-white mb-4">Delete Event</h3>
+              
+              <p className="text-neutral-300 mb-2">
+                Are you sure you want to delete this event?
+              </p>
+              
+              <div className="bg-neutral-950 border border-neutral-800 rounded-lg p-3 mb-4">
+                <p className="text-sm text-neutral-200">
+                  {getEventDescription(eventToDelete)}
+                </p>
+                {eventToDelete.transcript_segment && (
+                  <p className="text-xs text-neutral-400 mt-2 italic">
+                    "{eventToDelete.transcript_segment}"
+                  </p>
+                )}
+              </div>
+              
+              <p className="text-sm text-amber-200/90 mb-4">
+                Warning: This will reverse the event's effects (restore HP, remove from initiative, etc.)
+              </p>
+              
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={handleCancelDelete}
+                  disabled={deletingEventId !== null}
+                  className="px-4 py-2 bg-white/5 text-white border border-white/10 rounded-xl hover:bg-white/10 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => eventToDelete && handleDeleteEvent(eventToDelete)}
+                  disabled={deletingEventId !== null}
+                  className="px-4 py-2 bg-red-500/15 text-red-200 border border-red-500/30 rounded-xl hover:bg-red-500/20 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {deletingEventId === eventToDelete.id ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

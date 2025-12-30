@@ -349,3 +349,4 @@ async def add_message(
         logger.error(f'Error adding message: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
+

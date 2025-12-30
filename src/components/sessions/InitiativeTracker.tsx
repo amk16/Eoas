@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import api from '../../services/api';
 import Stepper, { type StepperStep } from '../ui/Stepper';
 
@@ -22,15 +22,16 @@ interface CombatState {
 interface InitiativeTrackerProps {
   sessionId: string | number;
   onUpdate?: () => void;
+  refreshKey?: number | string; // When this changes, refresh combat state
 }
 
-export default function InitiativeTracker({ sessionId, onUpdate }: InitiativeTrackerProps) {
+export default function InitiativeTracker({ sessionId, onUpdate, refreshKey }: InitiativeTrackerProps) {
   const [combatState, setCombatState] = useState<CombatState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
 
-  const fetchCombatState = async () => {
+  const fetchCombatState = useCallback(async () => {
     try {
       setLoading(true);
       setError('');
@@ -42,17 +43,21 @@ export default function InitiativeTracker({ sessionId, onUpdate }: InitiativeTra
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
 
+  // Fetch on mount and when sessionId changes
   useEffect(() => {
     if (sessionId) {
       fetchCombatState();
-      
-      // Poll for updates every 2 seconds
-      const interval = setInterval(fetchCombatState, 2000);
-      return () => clearInterval(interval);
     }
-  }, [sessionId]);
+  }, [sessionId, fetchCombatState]);
+
+  // Refresh when refreshKey changes (triggered by parent when events are created/updated)
+  useEffect(() => {
+    if (sessionId && refreshKey !== undefined) {
+      fetchCombatState();
+    }
+  }, [refreshKey, sessionId, fetchCombatState]);
 
   const handleAdvanceTurn = async () => {
     try {

@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # API Keys
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY') or os.getenv('ELEVENLABS_API_KEY_CONVAI')
+ELEVENLABS_API_KEY = os.getenv('ELEVENLABS_API_KEY')
 
 # Model configuration
 GEMINI_MODEL = "models/gemini-2.5-flash"

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 import logging
 from ..middleware.auth import authenticate_token
 from ..db.database import get_database
@@ -92,7 +92,7 @@ class EventCreate(BaseModel):
     for each specific event type.
     """
     type: str  # Required: the event type name (e.g., 'damage', 'initiative_roll', 'status_condition_applied')
-    character_id: Optional[int] = None
+    character_id: Optional[Union[int, str]] = None  # Accept both int (legacy SQLite) and str (Firestore)
     character_name: Optional[str] = None
     amount: Optional[int] = None
     initiative_value: Optional[int] = None
@@ -624,7 +624,7 @@ async def create_combat_event(
 # Generic event endpoint - handles all event types through the registry
 @router.post('/{session_id}/event')
 async def create_event(
-    session_id: int,
+    session_id: str,
     event: EventCreate,
     user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
@@ -693,11 +693,24 @@ async def create_event(
                 detail='Event data validation failed'
             )
         
-        # Get database connection
+        # Get Firestore database (handle_event expects db_firestore and session_ref)
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        # Get session reference for Firestore operations
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get database connection for SQLite (if needed)
         db = get_database()
         
         # Delegate to event type's handler (this does all the work)
-        result = await event_type.handle_event(event_data, session_id, user_id, db)
+        result = await event_type.handle_event(event_data, session_id, user_id, db_firestore, session_ref)
         
         return result
             
@@ -705,6 +718,311 @@ async def create_event(
         raise
     except Exception as e:
         print(f'Error creating event: {e}')
+        raise HTTPException(status_code=500, detail='Internal server error')
+
+
+@router.delete('/{session_id}/events/{event_id}')
+async def delete_event(
+    session_id: str,
+    event_id: str,
+    user_id: str = Depends(authenticate_token)
+) -> Dict[str, Any]:
+    """Delete an event and reverse its effects.
+    
+    This endpoint will:
+    1. Retrieve the event from Firestore
+    2. Reverse the effects based on event type (restore HP, remove from initiative, etc.)
+    3. Delete the event document from Firestore
+    """
+    try:
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[SESSIONS] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
+        
+        # Verify session belongs to user
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+        session_doc = session_ref.get()
+        
+        if not session_doc.exists:
+            raise HTTPException(status_code=404, detail='Session not found')
+        
+        # Get event from Firestore
+        event_ref = session_ref.collection('events').document(str(event_id))
+        event_doc = event_ref.get()
+        
+        if not event_doc.exists:
+            raise HTTPException(status_code=404, detail='Event not found')
+        
+        event_data = event_doc.to_dict()
+        event_type = event_data.get('type')
+        character_id = event_data.get('character_id')
+        
+        # Reverse effects based on event type
+        if event_type == 'damage':
+            # Restore HP: add amount back, capped at max_hp
+            if character_id:
+                character_id_str = str(character_id)
+                session_character_ref = session_ref.collection('session_characters').document(character_id_str)
+                session_character_doc = session_character_ref.get()
+                
+                if session_character_doc.exists:
+                    session_character_data = session_character_doc.to_dict()
+                    current_hp = session_character_data.get('current_hp', 0)
+                    amount = event_data.get('amount', 0)
+                    
+                    # Get max_hp from character
+                    character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id_str)
+                    character_doc = character_ref.get()
+                    max_hp = 100  # default
+                    if character_doc.exists:
+                        char_data = character_doc.to_dict()
+                        max_hp = char_data.get('max_hp', 100)
+                    
+                    # Restore HP
+                    new_hp = min(max_hp, current_hp + amount)
+                    session_character_ref.update({'current_hp': new_hp})
+                    
+        elif event_type == 'healing':
+            # Reverse healing: subtract amount, minimum 0
+            if character_id:
+                character_id_str = str(character_id)
+                session_character_ref = session_ref.collection('session_characters').document(character_id_str)
+                session_character_doc = session_character_ref.get()
+                
+                if session_character_doc.exists:
+                    session_character_data = session_character_doc.to_dict()
+                    current_hp = session_character_data.get('current_hp', 0)
+                    amount = event_data.get('amount', 0)
+                    
+                    # Reverse healing
+                    new_hp = max(0, current_hp - amount)
+                    session_character_ref.update({'current_hp': new_hp})
+                    
+        elif event_type == 'initiative_roll':
+            # Remove from initiative order and recalculate
+            if character_id:
+                character_id_str = str(character_id)
+                
+                # Remove from Firestore initiative_order
+                initiative_order_ref = session_ref.collection('initiative_order').document(character_id_str)
+                initiative_order_doc = initiative_order_ref.get()
+                
+                if initiative_order_doc.exists:
+                    initiative_order_ref.delete()
+                    
+                    # Recalculate turn_order for remaining characters
+                    all_initiative_orders = session_ref.collection('initiative_order').stream()
+                    initiative_list = []
+                    for doc in all_initiative_orders:
+                        data = doc.to_dict()
+                        initiative_list.append({
+                            'character_id': data['character_id'],
+                            'initiative_value': data['initiative_value'],
+                            'timestamp': data.get('updated_at')
+                        })
+                    
+                    # Sort by initiative value (descending), then by character_id for consistency
+                    initiative_list.sort(key=lambda x: (x['initiative_value'], str(x['character_id'])), reverse=True)
+                    
+                    # Update turn_order for each
+                    for idx, item in enumerate(initiative_list, start=1):
+                        order_ref = session_ref.collection('initiative_order').document(str(item['character_id']))
+                        order_ref.update({
+                            'turn_order': idx,
+                            'updated_at': firestore.SERVER_TIMESTAMP
+                        })
+                    
+                    # Update combat_state if current_turn_character_id was deleted
+                    combat_state_ref = session_ref.collection('combat_state').document('current')
+                    combat_state_doc = combat_state_ref.get()
+                    
+                    if combat_state_doc.exists:
+                        combat_state_data = combat_state_doc.to_dict()
+                        current_turn_char_id = combat_state_data.get('current_turn_character_id')
+                        
+                        if str(current_turn_char_id) == character_id_str:
+                            # Set first character as current turn, or None if no characters left
+                            if initiative_list:
+                                first_char_id = initiative_list[0]['character_id']
+                                combat_state_ref.update({
+                                    'current_turn_character_id': first_char_id,
+                                    'updated_at': firestore.SERVER_TIMESTAMP
+                                })
+                            else:
+                                # No characters left, deactivate combat
+                                combat_state_ref.update({
+                                    'is_active': False,
+                                    'current_turn_character_id': None,
+                                    'updated_at': firestore.SERVER_TIMESTAMP
+                                })
+                    
+                    # Also update SQLite if possible
+                    try:
+                        session_id_int = int(session_id)
+                        character_id_int = int(character_id)
+                        db = get_database()
+                        
+                        db.execute(
+                            'DELETE FROM initiative_order WHERE session_id = ? AND character_id = ?',
+                            (session_id_int, character_id_int)
+                        )
+                        
+                        # Recalculate turn_order in SQLite
+                        initiative_rows = db.execute(
+                            '''SELECT character_id, initiative_value 
+                               FROM initiative_order 
+                               WHERE session_id = ? 
+                               ORDER BY initiative_value DESC, character_id ASC''',
+                            (session_id_int,)
+                        ).fetchall()
+                        
+                        for idx, row in enumerate(initiative_rows, start=1):
+                            db.execute(
+                                'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
+                                (idx, session_id_int, row['character_id'])
+                            )
+                        
+                        # Update combat_state if needed
+                        combat_state = db.execute(
+                            'SELECT * FROM combat_state WHERE session_id = ?',
+                            (session_id_int,)
+                        ).fetchone()
+                        
+                        if combat_state:
+                            if combat_state['current_turn_character_id'] == character_id_int:
+                                if initiative_rows:
+                                    first_char = db.execute(
+                                        '''SELECT character_id FROM initiative_order 
+                                           WHERE session_id = ? 
+                                           ORDER BY turn_order ASC LIMIT 1''',
+                                        (session_id_int,)
+                                    ).fetchone()
+                                    if first_char:
+                                        db.execute(
+                                            'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
+                                            (first_char['character_id'], session_id_int)
+                                        )
+                                else:
+                                    db.execute(
+                                        'UPDATE combat_state SET is_active = 0, current_turn_character_id = NULL WHERE session_id = ?',
+                                        (session_id_int,)
+                                    )
+                        
+                        db.commit()
+                    except (ValueError, TypeError):
+                        # Can't convert to int, skip SQLite update
+                        pass
+                    
+        elif event_type == 'status_condition_applied':
+            # Remove from active status conditions
+            if character_id:
+                character_id_str = str(character_id)
+                condition_name = event_data.get('condition_name')
+                
+                try:
+                    session_id_int = int(session_id)
+                    character_id_int = int(character_id_str)
+                    db = get_database()
+                    
+                    db.execute(
+                        '''DELETE FROM active_status_conditions 
+                           WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
+                        (session_id_int, character_id_int, condition_name)
+                    )
+                    db.commit()
+                except (ValueError, TypeError):
+                    # Can't convert to int, skip SQLite update
+                    pass
+                    
+        elif event_type == 'status_condition_removed':
+            # Re-add to active status conditions (if we had the original data, we'd restore it)
+            # For now, we'll just delete the event - restoring the condition would require
+            # finding the original "applied" event, which is complex
+            # This is acceptable as the condition may have expired anyway
+            pass
+            
+        elif event_type == 'buff_debuff_applied':
+            # Remove from active buffs/debuffs
+            if character_id:
+                character_id_str = str(character_id)
+                effect_name = event_data.get('effect_name')
+                
+                try:
+                    session_id_int = int(session_id)
+                    character_id_int = int(character_id_str)
+                    db = get_database()
+                    
+                    db.execute(
+                        '''DELETE FROM active_buff_debuffs 
+                           WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                        (session_id_int, character_id_int, effect_name)
+                    )
+                    db.commit()
+                except (ValueError, TypeError):
+                    # Can't convert to int, skip SQLite update
+                    pass
+                    
+        elif event_type == 'buff_debuff_removed':
+            # Re-adding buff/debuff would require original data, similar to status_condition_removed
+            # Just delete the event for now
+            pass
+            
+        elif event_type == 'spell_cast':
+            # Decrement spell slot usage
+            if character_id:
+                character_id_str = str(character_id)
+                spell_level = event_data.get('spell_level', 0)
+                
+                if spell_level > 0:  # Only track slots for non-cantrips
+                    try:
+                        session_id_int = int(session_id)
+                        character_id_int = int(character_id_str)
+                        db = get_database()
+                        
+                        # Check current slots_used
+                        current_slot = db.execute(
+                            '''SELECT slots_used FROM character_spell_slots
+                               WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
+                            (session_id_int, character_id_int, spell_level)
+                        ).fetchone()
+                        
+                        if current_slot:
+                            new_slots_used = max(0, current_slot['slots_used'] - 1)
+                            if new_slots_used > 0:
+                                db.execute(
+                                    '''UPDATE character_spell_slots 
+                                       SET slots_used = ? 
+                                       WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
+                                    (new_slots_used, session_id_int, character_id_int, spell_level)
+                                )
+                            else:
+                                db.execute(
+                                    '''DELETE FROM character_spell_slots
+                                       WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
+                                    (session_id_int, character_id_int, spell_level)
+                                )
+                            db.commit()
+                    except (ValueError, TypeError):
+                        # Can't convert to int, skip SQLite update
+                        pass
+        
+        # For other event types (turn_advance, round_start, combat_end), just delete the event
+        # No state reversal needed
+        
+        # Delete the event from Firestore
+        event_ref.delete()
+        
+        return {
+            'message': 'Event deleted successfully',
+            'event_id': event_id,
+            'event_type': event_type
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f'Error deleting event: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 

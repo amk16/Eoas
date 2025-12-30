@@ -12,7 +12,7 @@ from ..services.ioun_service import (
     get_conversation_history,
     add_to_history
 )
-from ..services.conversational_ai_service import build_system_prompt
+from ..services.prompt_service import build_system_prompt
 from ..services.context_service import get_user_context
 from ..services.dnd_rules_service import get_dnd_rules_knowledge
 
