@@ -3,13 +3,13 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { EnhancedResponse } from './voice-assistant/EnhancedResponse';
 import { chatWithIoun, executeCreations, type CreationRequest } from '../services/iounService';
 import { useAuth } from '../context/AuthContext';
-import { getPulseDuration, getGlowIntensity, getSpinDuration, STATE_COLORS, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
+import { getGlowIntensity, getSpinDuration, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
 import { generateIdleSegments } from './voice-assistant/arcUtils';
 import { IDLE_HINT_CONFIG } from './voice-assistant/idleHintConfig';
 import LiveScribeSilence from './LiveScribeSilence';
 import ConversationsDrawer from './conversations/ConversationsDrawer';
 import { createConversation, getConversation } from '../services/conversationService';
-import type { Conversation, ConversationMessage } from '../types';
+import type { Conversation } from '../types';
 
 interface ChatMessage {
   id: string;
@@ -20,7 +20,6 @@ interface ChatMessage {
 }
 
 export default function VoiceAssistant() {
-  const { user } = useAuth();
   const { conversationId: urlConversationId } = useParams<{ conversationId?: string }>();
   const navigate = useNavigate();
   const [error, setError] = useState<string>('');
@@ -48,7 +47,7 @@ export default function VoiceAssistant() {
   const isProcessingRef = useRef(false);
 
   const accumulatedTranscriptRef = useRef<string>('');
-  const silenceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
   
   // NEW: Track if silence was detected but we are waiting for the text commit
@@ -566,7 +565,6 @@ export default function VoiceAssistant() {
     ? 'connecting' 
     : 'idle';
 
-  const pulseDuration = getPulseDuration(buttonState === 'listening' ? 'connected' : buttonState);
   const glowIntensity = getGlowIntensity(buttonState === 'listening' ? 'connected' : buttonState);
   const segmentPaths = useMemo(() => generateIdleSegments(), []);
 

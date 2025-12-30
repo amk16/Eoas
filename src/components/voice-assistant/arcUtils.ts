@@ -87,7 +87,6 @@ export function generateSegmentPaths(
   // Each segment occupies 72° (360° / 5)
   // If segmentLength is less than 72°, there will be gaps
   const segmentSpacing = 360 / segmentCount; // 72°
-  const gapSize = segmentSpacing - segmentLength;
   
   for (let i = 0; i < segmentCount; i++) {
     // Calculate start and end angles for this segment

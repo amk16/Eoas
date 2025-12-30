@@ -3,7 +3,7 @@ import api from '../../services/api';
 
 interface StatusCondition {
   session_id: number;
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   condition_name: string;
   applied_at: string;
@@ -13,7 +13,7 @@ interface StatusCondition {
 
 interface BuffDebuff {
   session_id: number;
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   effect_name: string;
   effect_type: 'buff' | 'debuff';
@@ -26,14 +26,14 @@ interface BuffDebuff {
 }
 
 interface SpellSlotUsage {
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   slots_by_level: Record<string, number>; // e.g., {"1": 3, "2": 1, "3": 0}
 }
 
 interface CharacterDetailSidebarProps {
   sessionId: number;
-  characterId: number | null;
+  characterId: string | null;
   characterName: string | null;
   isOpen: boolean;
   onClose: () => void;
@@ -76,7 +76,7 @@ export default function CharacterDetailSidebar({
       const response = await api.get(`/sessions/${sessionId}/status-conditions`);
       // Filter conditions for this character
       const characterConditions = response.data.filter(
-        (c: StatusCondition) => c.character_id === characterId
+        (c: StatusCondition) => String(c.character_id) === characterId
       );
       setConditions(characterConditions);
     } catch (err: any) {

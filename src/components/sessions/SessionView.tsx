@@ -83,7 +83,7 @@ export default function SessionView() {
   const [analyzing, setAnalyzing] = useState(false);
   
   // Phase 2: Character detail sidebar state
-  const [selectedCharacterId, setSelectedCharacterId] = useState<number | null>(null);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [selectedCharacterName, setSelectedCharacterName] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   
@@ -822,7 +822,7 @@ export default function SessionView() {
                   <div
                     key={char.character_id}
                     onClick={() => {
-                      setSelectedCharacterId(char.character_id);
+                      setSelectedCharacterId(String(char.character_id));
                       setSelectedCharacterName(char.character_name);
                       setIsSidebarOpen(true);
                     }}
