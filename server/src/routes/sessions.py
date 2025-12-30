@@ -857,83 +857,9 @@ async def delete_event(
                                     'updated_at': firestore.SERVER_TIMESTAMP
                                 })
                     
-                    # Also update SQLite if possible
-                    try:
-                        session_id_int = int(session_id)
-                        character_id_int = int(character_id)
-                        db = get_database()
-                        
-                        db.execute(
-                            'DELETE FROM initiative_order WHERE session_id = ? AND character_id = ?',
-                            (session_id_int, character_id_int)
-                        )
-                        
-                        # Recalculate turn_order in SQLite
-                        initiative_rows = db.execute(
-                            '''SELECT character_id, initiative_value 
-                               FROM initiative_order 
-                               WHERE session_id = ? 
-                               ORDER BY initiative_value DESC, character_id ASC''',
-                            (session_id_int,)
-                        ).fetchall()
-                        
-                        for idx, row in enumerate(initiative_rows, start=1):
-                            db.execute(
-                                'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
-                                (idx, session_id_int, row['character_id'])
-                            )
-                        
-                        # Update combat_state if needed
-                        combat_state = db.execute(
-                            'SELECT * FROM combat_state WHERE session_id = ?',
-                            (session_id_int,)
-                        ).fetchone()
-                        
-                        if combat_state:
-                            if combat_state['current_turn_character_id'] == character_id_int:
-                                if initiative_rows:
-                                    first_char = db.execute(
-                                        '''SELECT character_id FROM initiative_order 
-                                           WHERE session_id = ? 
-                                           ORDER BY turn_order ASC LIMIT 1''',
-                                        (session_id_int,)
-                                    ).fetchone()
-                                    if first_char:
-                                        db.execute(
-                                            'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
-                                            (first_char['character_id'], session_id_int)
-                                        )
-                                else:
-                                    db.execute(
-                                        'UPDATE combat_state SET is_active = 0, current_turn_character_id = NULL WHERE session_id = ?',
-                                        (session_id_int,)
-                                    )
-                        
-                        db.commit()
-                    except (ValueError, TypeError):
-                        # Can't convert to int, skip SQLite update
-                        pass
-                    
         elif event_type == 'status_condition_applied':
-            # Remove from active status conditions
-            if character_id:
-                character_id_str = str(character_id)
-                condition_name = event_data.get('condition_name')
-                
-                try:
-                    session_id_int = int(session_id)
-                    character_id_int = int(character_id_str)
-                    db = get_database()
-                    
-                    db.execute(
-                        '''DELETE FROM active_status_conditions 
-                           WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
-                        (session_id_int, character_id_int, condition_name)
-                    )
-                    db.commit()
-                except (ValueError, TypeError):
-                    # Can't convert to int, skip SQLite update
-                    pass
+            # Remove from active status conditions (handled in Firestore via event deletion)
+            pass
                     
         elif event_type == 'status_condition_removed':
             # Re-add to active status conditions (if we had the original data, we'd restore it)
@@ -943,25 +869,8 @@ async def delete_event(
             pass
             
         elif event_type == 'buff_debuff_applied':
-            # Remove from active buffs/debuffs
-            if character_id:
-                character_id_str = str(character_id)
-                effect_name = event_data.get('effect_name')
-                
-                try:
-                    session_id_int = int(session_id)
-                    character_id_int = int(character_id_str)
-                    db = get_database()
-                    
-                    db.execute(
-                        '''DELETE FROM active_buff_debuffs 
-                           WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
-                        (session_id_int, character_id_int, effect_name)
-                    )
-                    db.commit()
-                except (ValueError, TypeError):
-                    # Can't convert to int, skip SQLite update
-                    pass
+            # Remove from active buffs/debuffs (handled in Firestore via event deletion)
+            pass
                     
         elif event_type == 'buff_debuff_removed':
             # Re-adding buff/debuff would require original data, similar to status_condition_removed
@@ -969,43 +878,8 @@ async def delete_event(
             pass
             
         elif event_type == 'spell_cast':
-            # Decrement spell slot usage
-            if character_id:
-                character_id_str = str(character_id)
-                spell_level = event_data.get('spell_level', 0)
-                
-                if spell_level > 0:  # Only track slots for non-cantrips
-                    try:
-                        session_id_int = int(session_id)
-                        character_id_int = int(character_id_str)
-                        db = get_database()
-                        
-                        # Check current slots_used
-                        current_slot = db.execute(
-                            '''SELECT slots_used FROM character_spell_slots
-                               WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
-                            (session_id_int, character_id_int, spell_level)
-                        ).fetchone()
-                        
-                        if current_slot:
-                            new_slots_used = max(0, current_slot['slots_used'] - 1)
-                            if new_slots_used > 0:
-                                db.execute(
-                                    '''UPDATE character_spell_slots 
-                                       SET slots_used = ? 
-                                       WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
-                                    (new_slots_used, session_id_int, character_id_int, spell_level)
-                                )
-                            else:
-                                db.execute(
-                                    '''DELETE FROM character_spell_slots
-                                       WHERE session_id = ? AND character_id = ? AND spell_level = ?''',
-                                    (session_id_int, character_id_int, spell_level)
-                                )
-                            db.commit()
-                    except (ValueError, TypeError):
-                        # Can't convert to int, skip SQLite update
-                        pass
+            # Spell slot tracking (if needed, should be handled in Firestore)
+            pass
         
         # For other event types (turn_advance, round_start, combat_end), just delete the event
         # No state reversal needed
@@ -1023,60 +897,6 @@ async def delete_event(
         raise
     except Exception as e:
         logger.error(f'Error deleting event: {e}')
-        raise HTTPException(status_code=500, detail='Internal server error')
-
-
-# Phase 1: Get initiative order
-@router.get('/{session_id}/initiative')
-async def get_initiative_order(
-    session_id: int,
-    user_id: str = Depends(authenticate_token)
-) -> Dict[str, Any]:
-    """Get current initiative order for a session."""
-    try:
-        db = get_database()
-        
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
-        # Get combat state
-        combat_state = db.execute(
-            'SELECT * FROM combat_state WHERE session_id = ?',
-            (session_id,)
-        ).fetchone()
-        
-        # Get initiative order
-        initiative_rows = db.execute('''
-            SELECT 
-                io.character_id,
-                io.initiative_value,
-                io.turn_order,
-                c.name as character_name
-            FROM initiative_order io
-            JOIN characters c ON io.character_id = c.id
-            WHERE io.session_id = ?
-            ORDER BY io.turn_order ASC
-        ''', (session_id,)).fetchall()
-        
-        initiative_list = [dict(row) for row in initiative_rows]
-        
-        result = {
-            'initiative_order': initiative_list,
-            'combat_state': dict(combat_state) if combat_state else None
-        }
-        
-        return result
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f'Error fetching initiative order: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1100,111 +920,63 @@ async def get_combat_state(
         if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Combat state is still in SQLite, so we need to convert session_id to int
-        # If conversion fails, return empty combat state (combat not active)
-        # This is expected for Firestore sessions until combat state is migrated
-        try:
-            session_id_int = int(session_id)
-            # Legacy SQLite path (only reached if session_id_int was successfully converted)
-            db = get_database()
-            
-            # Get combat state from SQLite
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id_int,)
-            ).fetchone()
-            
-            if combat_state:
-                # Get initiative order with character names from SQLite
-                initiative_rows = db.execute('''
-                    SELECT 
-                        io.character_id,
-                        io.initiative_value,
-                        io.turn_order,
-                        c.name as character_name
-                    FROM initiative_order io
-                    JOIN characters c ON io.character_id = c.id
-                    WHERE io.session_id = ?
-                    ORDER BY io.turn_order ASC
-                ''', (session_id_int,)).fetchall()
-                
-                initiative_list = [dict(row) for row in initiative_rows]
-                
-                # Get current turn character name
-                current_turn_char_name = None
-                if combat_state['current_turn_character_id']:
-                    char = db.execute(
-                        'SELECT name FROM characters WHERE id = ?',
-                        (combat_state['current_turn_character_id'],)
-                    ).fetchone()
-                    if char:
-                        current_turn_char_name = char['name']
-                
-                return {
-                    'is_active': bool(combat_state['is_active']),
-                    'current_round': combat_state['current_round'],
-                    'current_turn_character_id': combat_state['current_turn_character_id'],
-                    'current_turn_character_name': current_turn_char_name,
-                    'initiative_order': initiative_list
-                }
-        except (ValueError, TypeError):
-            # Session ID is a Firestore string - read combat state from Firestore
-            combat_state_ref = session_ref.collection('combat_state').document('current')
-            combat_state_doc = combat_state_ref.get()
-            
-            if not combat_state_doc.exists:
-                # No combat state exists
-                return {
-                    'is_active': False,
-                    'current_round': 1,
-                    'current_turn_character_id': None,
-                    'current_turn_character_name': None,
-                    'initiative_order': []
-                }
-            
-            combat_state_data = combat_state_doc.to_dict()
-            
-            # Get initiative order from Firestore
-            initiative_order_ref = session_ref.collection('initiative_order')
-            all_orders = list(initiative_order_ref.stream())
-            
-            initiative_list = []
-            for doc in all_orders:
-                data = doc.to_dict()
-                initiative_list.append({
-                    'character_id': data.get('character_id'),
-                    'character_name': data.get('character_name', 'Unknown'),
-                    'initiative_value': data.get('initiative_value', 0),
-                    'turn_order': data.get('turn_order', 0)
-                })
-            
-            # Sort by turn_order
-            initiative_list.sort(key=lambda x: x.get('turn_order', 0))
-            
-            # Get current turn character name
-            current_turn_char_name = None
-            current_turn_char_id = combat_state_data.get('current_turn_character_id')
-            if current_turn_char_id:
-                for char in initiative_list:
-                    if str(char.get('character_id')) == str(current_turn_char_id):
-                        current_turn_char_name = char.get('character_name')
-                        break
-                
-                # If not found in initiative list, try to fetch from characters collection
-                if not current_turn_char_name:
-                    char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(current_turn_char_id))
-                    char_doc = char_ref.get()
-                    if char_doc.exists:
-                        char_data = char_doc.to_dict()
-                        current_turn_char_name = char_data.get('name', 'Unknown')
-            
+        # Read combat state from Firestore
+        combat_state_ref = session_ref.collection('combat_state').document('current')
+        combat_state_doc = combat_state_ref.get()
+        
+        if not combat_state_doc.exists:
+            # No combat state exists
             return {
-                'is_active': combat_state_data.get('is_active', False),
-                'current_round': combat_state_data.get('current_round', 1),
-                'current_turn_character_id': current_turn_char_id,
-                'current_turn_character_name': current_turn_char_name,
-                'initiative_order': initiative_list
+                'is_active': False,
+                'current_round': 1,
+                'current_turn_character_id': None,
+                'current_turn_character_name': None,
+                'initiative_order': []
             }
+        
+        combat_state_data = combat_state_doc.to_dict()
+        
+        # Get initiative order from Firestore
+        initiative_order_ref = session_ref.collection('initiative_order')
+        all_orders = list(initiative_order_ref.stream())
+        
+        initiative_list = []
+        for doc in all_orders:
+            data = doc.to_dict()
+            initiative_list.append({
+                'character_id': data.get('character_id'),
+                'character_name': data.get('character_name', 'Unknown'),
+                'initiative_value': data.get('initiative_value', 0),
+                'turn_order': data.get('turn_order', 0)
+            })
+        
+        # Sort by turn_order
+        initiative_list.sort(key=lambda x: x.get('turn_order', 0))
+        
+        # Get current turn character name
+        current_turn_char_name = None
+        current_turn_char_id = combat_state_data.get('current_turn_character_id')
+        if current_turn_char_id:
+            for char in initiative_list:
+                if str(char.get('character_id')) == str(current_turn_char_id):
+                    current_turn_char_name = char.get('character_name')
+                    break
+            
+            # If not found in initiative list, try to fetch from characters collection
+            if not current_turn_char_name:
+                char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(current_turn_char_id))
+                char_doc = char_ref.get()
+                if char_doc.exists:
+                    char_data = char_doc.to_dict()
+                    current_turn_char_name = char_data.get('name', 'Unknown')
+        
+        return {
+            'is_active': combat_state_data.get('is_active', False),
+            'current_round': combat_state_data.get('current_round', 1),
+            'current_turn_character_id': current_turn_char_id,
+            'current_turn_character_name': current_turn_char_name,
+            'initiative_order': initiative_list
+        }
         
     except HTTPException:
         raise
@@ -1314,69 +1086,6 @@ async def advance_turn(
                     'updated_at': firestore.SERVER_TIMESTAMP
                 })
         
-        # Also try to update SQLite for legacy compatibility (if session_id can be converted)
-        try:
-            session_id_int = int(session_id)
-            db = get_database()
-            
-            # Get combat state from SQLite
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id_int,)
-            ).fetchone()
-            
-            if not combat_state or not combat_state['is_active']:
-                # Return updated combat state from Firestore
-                return await get_combat_state(session_id, user_id)
-            
-            # Get current turn character
-            current_char_id_int = combat_state['current_turn_character_id']
-            if not current_char_id_int:
-                return await get_combat_state(session_id, user_id)
-            
-            # Get current turn order
-            current_turn = db.execute(
-                'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
-                (session_id_int, current_char_id_int)
-            ).fetchone()
-            
-            if not current_turn:
-                return await get_combat_state(session_id, user_id)
-            
-            # Get next character in order
-            next_char = db.execute(
-                '''SELECT character_id FROM initiative_order 
-                   WHERE session_id = ? AND turn_order > ?
-                   ORDER BY turn_order ASC LIMIT 1''',
-                (session_id_int, current_turn['turn_order'])
-            ).fetchone()
-            
-            if next_char:
-                db.execute(
-                    'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
-                    (next_char['character_id'], session_id_int)
-                )
-            else:
-                first_char = db.execute(
-                    '''SELECT character_id FROM initiative_order 
-                       WHERE session_id = ? 
-                       ORDER BY turn_order ASC LIMIT 1''',
-                    (session_id_int,)
-                ).fetchone()
-                
-                if first_char:
-                    db.execute(
-                        '''UPDATE combat_state 
-                           SET current_turn_character_id = ?, current_round = current_round + 1 
-                           WHERE session_id = ?''',
-                        (first_char['character_id'], session_id_int)
-                    )
-            
-            db.commit()
-        except (ValueError, TypeError):
-            # Can't convert to int, skip SQLite update (Firestore is the source of truth)
-            pass
-        
         # Return updated combat state
         return await get_combat_state(session_id, user_id)
         
@@ -1386,63 +1095,6 @@ async def advance_turn(
         db = get_database()
         db.rollback()
         print(f'Error advancing turn: {e}')
-        raise HTTPException(status_code=500, detail='Internal server error')
-
-
-# Phase 1: Manually reorder initiative
-@router.post('/{session_id}/initiative/reorder')
-async def reorder_initiative(
-    session_id: int,
-    request: InitiativeReorderRequest,
-    user_id: str = Depends(authenticate_token)
-) -> Dict[str, Any]:
-    """Manually reorder initiative for a session."""
-    try:
-        db = get_database()
-        
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
-        # Update turn orders
-        for char_order in request.character_orders:
-            char_id = char_order.get('character_id')
-            turn_order = char_order.get('turn_order')
-            
-            if char_id is None or turn_order is None:
-                continue
-            
-            # Verify character is in session
-            session_char = db.execute(
-                'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-                (session_id, char_id)
-            ).fetchone()
-            
-            if not session_char:
-                continue
-            
-            # Update turn order
-            db.execute(
-                'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
-                (turn_order, session_id, char_id)
-            )
-        
-        db.commit()
-        
-        # Return updated initiative order
-        return await get_initiative_order(session_id, user_id)
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        db = get_database()
-        db.rollback()
-        print(f'Error reordering initiative: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 

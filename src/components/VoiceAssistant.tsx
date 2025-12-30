@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { EnhancedResponse } from './voice-assistant/EnhancedResponse';
-import { chatWithIoun } from '../services/iounService';
+import { chatWithIoun, executeCreations, type CreationRequest } from '../services/iounService';
 import { useAuth } from '../context/AuthContext';
 import { getPulseDuration, getGlowIntensity, getSpinDuration, STATE_COLORS, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
 import { generateIdleSegments } from './voice-assistant/arcUtils';
@@ -34,6 +34,7 @@ export default function VoiceAssistant() {
   // Conversation management
   // Always start with null on mount - will be set by URL param effect if needed (but not on refresh)
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
+  const currentConversationIdRef = useRef<string | null>(null); // Ref for synchronous access
   const [currentConversation, setCurrentConversation] = useState<Conversation | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
@@ -61,22 +62,33 @@ export default function VoiceAssistant() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [isPlayingAudio, setIsPlayingAudio] = useState(false);
   
+  // Creation requests
+  const [pendingCreationRequests, setPendingCreationRequests] = useState<CreationRequest[]>([]);
+  const [isExecutingCreations, setIsExecutingCreations] = useState(false);
+  
   // Conversation history (kept for backward compatibility, but now managed via Firestore)
   const conversationHistoryRef = useRef<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
   
   // Track if this is the initial mount (page refresh) - use state to prevent rendering
   const [isInitializing, setIsInitializing] = useState(true);
-  const isInitialMountRef = useRef(true);
+  const [isCreatingConversation, setIsCreatingConversation] = useState(false);
   
-  // On page refresh/mount: clear state and navigate to base URL
+  // On page refresh/mount: check for URL conversation ID, load if exists, otherwise clear state
   useEffect(() => {
-    // Mark that we're on initial mount FIRST to prevent URL param effect from running
-    isInitialMountRef.current = true;
+    // If URL has a conversation ID, load it instead of clearing
+    if (urlConversationId) {
+      console.log('[VoiceAssistant] Initial mount with conversation ID in URL, loading conversation');
+      loadConversation(urlConversationId).finally(() => {
+        setIsInitializing(false);
+      });
+      return;
+    }
     
-    // Clear all state on initial mount (page refresh)
+    // No conversation ID in URL - clear state and prepare for auto-creation
     setMessages([]);
     setError('');
     setCurrentConversationId(null);
+    currentConversationIdRef.current = null; // Clear ref
     setCurrentConversation(null);
     setIsScribeActive(false);
     setIsProcessing(false);
@@ -96,35 +108,60 @@ export default function VoiceAssistant() {
     // Mark initialization complete after navigation settles
     // This prevents any flash by ensuring we don't render messages during init
     setTimeout(() => {
-      isInitialMountRef.current = false;
       setIsInitializing(false);
-      console.log('[VoiceAssistant] Page refreshed - state cleared, navigated to base URL');
+      console.log('[VoiceAssistant] Initial mount - state cleared, navigated to base URL');
     }, 50);
   }, []); // Empty dependency array - runs only on mount
   
-  // Load conversation from URL param (skip on initial mount/refresh)
+  // Load conversation from URL param when it changes
   useEffect(() => {
-    // Skip on initial mount - we've already cleared state and navigated to base
-    // This prevents any loading/flashing during page refresh
-    if (isInitialMountRef.current) {
-      return;
-    }
-    
-    // Only process URL changes after initial mount
+    // Only load if URL has a conversation ID that's different from current
     if (urlConversationId && urlConversationId !== currentConversationId) {
       // URL has a conversation ID that's different from current - load it
       loadConversation(urlConversationId);
-    } else if (!urlConversationId && currentConversationId) {
-      // URL has no conversation ID but we have one in state
-      // This happens when user navigates to base route - clear conversation state
-      // Note: We don't check isProcessing/isScribeActive here because navigation
-      // to base route is an explicit action (e.g., "New Chat" button)
-      setCurrentConversationId(null);
-      setCurrentConversation(null);
-      setMessages([]);
     }
     // Note: We don't include currentConversationId in deps to avoid triggering on mount state changes
   }, [urlConversationId]); // Only depend on URL param, not currentConversationId
+  
+  // Auto-create conversation after initialization if none exists
+  useEffect(() => {
+    // Skip if still initializing, loading a conversation, or already creating one
+    if (isInitializing || isLoadingConversation || isCreatingConversation) {
+      return;
+    }
+    
+    // Skip if we already have a conversation ID
+    if (currentConversationId) {
+      return;
+    }
+    
+    // Skip if URL has a conversation ID (it will be loaded by the URL param effect)
+    if (urlConversationId) {
+      return;
+    }
+    
+    // Auto-create conversation when on base route without a conversation
+    const createInitialConversation = async () => {
+      try {
+        setIsCreatingConversation(true);
+        console.log('[VoiceAssistant] Auto-creating initial conversation');
+        const newConversation = await createConversation();
+        setCurrentConversationId(newConversation.id);
+        currentConversationIdRef.current = newConversation.id; // Update ref synchronously
+        setCurrentConversation(newConversation);
+        // Navigate to conversation URL
+        navigate(`/ioun-silence/${newConversation.id}`, { replace: true });
+        console.log(`[VoiceAssistant] Auto-created conversation: ${newConversation.id}`);
+      } catch (err: any) {
+        console.error('Error auto-creating conversation:', err);
+        setError(err.message || 'Failed to create conversation');
+      } finally {
+        setIsCreatingConversation(false);
+      }
+    };
+    
+    createInitialConversation();
+  }, [isInitializing, isLoadingConversation, isCreatingConversation, currentConversationId, urlConversationId, navigate]);
   
   const loadConversation = async (conversationId: string) => {
     try {
@@ -132,6 +169,7 @@ export default function VoiceAssistant() {
       setError(''); // Clear any previous errors
       const conversation = await getConversation(conversationId);
       setCurrentConversationId(conversationId);
+      currentConversationIdRef.current = conversationId; // Update ref synchronously
       setCurrentConversation(conversation);
       
       // Load messages from conversation (both user and assistant for display)
@@ -176,17 +214,21 @@ export default function VoiceAssistant() {
       lastCommittedTranscriptRef.current = '';
       recentTranscriptsRef.current = [];
       processedSilenceTranscriptRef.current = '';
+      setPendingCreationRequests([]);
       clearSilenceTimer();
       stopTTSAudio();
       
-      // Clear conversation state - new conversation will be created on first transcript
-      setCurrentConversationId(null);
-      setCurrentConversation(null);
-      navigate('/ioun-silence');
-      console.log('[VoiceAssistant] Cleared conversation state - ready for new conversation');
+      // Create new conversation when user clicks "New Chat"
+      const newConversation = await createConversation();
+      setCurrentConversationId(newConversation.id);
+      currentConversationIdRef.current = newConversation.id; // Update ref synchronously
+      setCurrentConversation(newConversation);
+      // Navigate to conversation URL instead of base URL
+      navigate(`/ioun-silence/${newConversation.id}`);
+      console.log(`[VoiceAssistant] Created new conversation: ${newConversation.id}`);
     } catch (err: any) {
-      console.error('Error clearing conversation:', err);
-      const errorMessage = err.message || 'Failed to clear conversation';
+      console.error('Error creating new conversation:', err);
+      const errorMessage = err.message || 'Failed to create new conversation';
       setError(errorMessage);
     }
   };
@@ -241,21 +283,11 @@ export default function VoiceAssistant() {
     try {
       console.log('[VoiceAssistant] Sending to Backend:', transcript);
       
-      // Create conversation if we don't have one yet
-      let conversationId = currentConversationId;
+      // Require an existing conversation - use ref for synchronous access
+      const conversationId = currentConversationIdRef.current;
       if (!conversationId) {
-        const newConversation = await createConversation();
-        conversationId = newConversation.id;
-        setCurrentConversationId(conversationId);
-        setCurrentConversation(newConversation);
-        navigate(`/ioun-silence/${conversationId}`);
-        console.log(`[VoiceAssistant] Created new conversation: ${conversationId}`);
-      }
-      
-      // Defensive check: Ensure conversationId is set before proceeding
-      if (!conversationId) {
-        console.error('[VoiceAssistant] No conversation ID available after creation attempt');
-        throw new Error('Failed to create or retrieve conversation');
+        console.error('[VoiceAssistant] No conversation ID available. Please start a new conversation first.');
+        throw new Error('No active conversation. Please click "New Chat" to start a conversation.');
       }
       
       // Note: Messages are saved by the backend via add_to_history in ioun.py
@@ -301,6 +333,12 @@ export default function VoiceAssistant() {
       if (response.audio_base64) {
         playTTSAudio(response.audio_base64);
       }
+      
+      // Handle creation requests if detected
+      if (response.creation_requests && response.creation_requests.length > 0) {
+        console.log(`[VoiceAssistant] Detected ${response.creation_requests.length} creation request(s)`);
+        setPendingCreationRequests(response.creation_requests);
+      }
     } catch (err: any) {
       console.error('[VoiceAssistant] Error:', err);
       setError(err.message || 'Failed to process transcript');
@@ -309,6 +347,69 @@ export default function VoiceAssistant() {
       setIsProcessing(false);
 
     }
+  };
+  
+  // Execute creation requests after user confirmation
+  const handleExecuteCreations = async () => {
+    if (pendingCreationRequests.length === 0) {
+      return;
+    }
+    
+    try {
+      setIsExecutingCreations(true);
+      setError('');
+      console.log(`[VoiceAssistant] Executing ${pendingCreationRequests.length} creation request(s)`);
+      
+      const result = await executeCreations(pendingCreationRequests);
+      
+      console.log(`[VoiceAssistant] Creation execution complete: ${result.success_count} success(es), ${result.error_count} error(s)`);
+      
+      // Show success/error messages
+      if (result.success_count > 0) {
+        const successMessages = result.created_items
+          .filter(item => item.status === 'success')
+          .map(item => {
+            const itemName = item.item.name || 'Item';
+            const itemType = item.action_type.replace('create_', '');
+            return `Created ${itemType}: ${itemName}`;
+          });
+        
+        // Add confirmation message to chat
+        const confirmationMessageId = `creation-confirm-${Date.now()}`;
+        setMessages(prev => [...prev, {
+          id: confirmationMessageId,
+          type: 'assistant',
+          text: `✓ ${successMessages.join(', ')}`,
+          timestamp: new Date(),
+          isStreaming: false
+        }]);
+      }
+      
+      if (result.error_count > 0) {
+        const errorMessages = result.created_items
+          .filter(item => item.status === 'error')
+          .map(item => item.error || 'Unknown error');
+        setError(`Some creations failed: ${errorMessages.join(', ')}`);
+      }
+      
+      // Clear pending requests
+      setPendingCreationRequests([]);
+      
+      // Refresh the page or reload context to show new items
+      // For now, just clear - user can refresh manually or we could trigger a reload
+      
+    } catch (err: any) {
+      console.error('[VoiceAssistant] Error executing creations:', err);
+      setError(err.message || 'Failed to execute creations');
+    } finally {
+      setIsExecutingCreations(false);
+    }
+  };
+  
+  // Cancel creation requests
+  const handleCancelCreations = () => {
+    setPendingCreationRequests([]);
+    console.log('[VoiceAssistant] Creation requests cancelled');
   };
 
   // Play TTS audio
@@ -380,6 +481,9 @@ export default function VoiceAssistant() {
     // 1. If we received text, trust it immediately
     if (partialText && partialText.trim()) {
         console.log('[VoiceAssistant] Trusting partial text:', partialText);
+        
+        // Clear any existing silence timer to prevent duplicate sends
+        clearSilenceTimer();
         
         // Force the accumulator to this text
         accumulatedTranscriptRef.current = partialText;
@@ -557,6 +661,58 @@ export default function VoiceAssistant() {
       {error && <div className="mb-4 p-3 bg-red-900/50 border border-red-500 rounded text-red-200 text-sm">{error}</div>}
       {isProcessing && <div className="mb-4 p-2 bg-neutral-800/50 border border-neutral-700 rounded text-neutral-300 text-sm">Processing...</div>}
       {isPlayingAudio && <div className="mb-4 p-2 bg-neutral-800/50 border border-neutral-700 rounded text-neutral-300 text-sm">🎤 Assistant is speaking...</div>}
+      
+      {/* Pending Creation Requests */}
+      {pendingCreationRequests.length > 0 && (
+        <div className="mb-4 p-4 bg-blue-900/30 border border-blue-500/50 rounded-lg">
+          <div className="mb-3">
+            <h4 className="text-sm font-semibold text-blue-200 mb-2">
+              Creation Requests Detected ({pendingCreationRequests.length})
+            </h4>
+            <div className="space-y-2">
+              {pendingCreationRequests.map((req, index) => (
+                <div key={index} className="text-sm text-neutral-200 bg-neutral-800/50 p-2 rounded">
+                  <div className="font-medium text-blue-300">
+                    {req.action_type.replace('create_', 'Create ').replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}
+                  </div>
+                  <div className="text-neutral-400 mt-1">
+                    {req.action_type === 'create_campaign' && (
+                      <>Campaign: <span className="text-white">{req.data.name}</span>{req.data.description && ` - ${req.data.description}`}</>
+                    )}
+                    {req.action_type === 'create_session' && (
+                      <>Session: <span className="text-white">{req.data.name}</span></>
+                    )}
+                    {req.action_type === 'create_character' && (
+                      <>Character: <span className="text-white">{req.data.name}</span> - {req.data.max_hp} HP{req.data.race && `, ${req.data.race}`}{req.data.class_name && ` ${req.data.class_name}`}</>
+                    )}
+                  </div>
+                  {req.transcript_segment && (
+                    <div className="text-xs text-neutral-500 mt-1 italic">
+                      "{req.transcript_segment}"
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={handleExecuteCreations}
+              disabled={isExecutingCreations}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-green-600/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {isExecutingCreations ? 'Creating...' : 'Confirm & Create'}
+            </button>
+            <button
+              onClick={handleCancelCreations}
+              disabled={isExecutingCreations}
+              className="px-4 py-2 bg-neutral-700 hover:bg-neutral-600 disabled:bg-neutral-700/50 disabled:cursor-not-allowed text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Controls */}
       <div className="flex gap-2 items-center justify-center">

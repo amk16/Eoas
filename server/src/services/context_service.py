@@ -1,14 +1,14 @@
 # context_service.py
 import logging
 from typing import Dict, Any, List, Optional
-from ..db.database import get_database
+from ..db.firebase import get_firestore
 
 logger = logging.getLogger(__name__)
 
 
 async def get_user_context(user_id: str) -> Dict[str, Any]:
     """
-    Gather all relevant context about a user's campaigns, sessions, and characters.
+    Gather all relevant context about a user's campaigns, sessions, and characters from Firestore.
     This context is used to inform the voice assistant about the user's data.
     
     Args:
@@ -20,92 +20,101 @@ async def get_user_context(user_id: str) -> Dict[str, Any]:
     logger.info(f"Gathering context for user {user_id}")
     
     try:
-        db = get_database()
+        db = get_firestore()
+        if not db:
+            logger.warning("Firestore not initialized, returning empty context")
+            return {
+                "campaigns": [],
+                "sessions": [],
+                "characters": []
+            }
+        
         context = {
             "campaigns": [],
             "sessions": [],
             "characters": []
         }
         
-        # Fetch campaigns
-        campaign_rows = db.execute(
-            'SELECT id, name, description, created_at FROM campaigns WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
-            (user_id,)
-        ).fetchall()
-        
-        context["campaigns"] = [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "description": dict(row).get("description"),
-                "created_at": dict(row).get("created_at")
-            }
-            for row in campaign_rows
-        ]
+        # Fetch campaigns from Firestore
+        campaigns_docs = db.collection('users').document(user_id).collection('campaigns').stream()
+        for doc in campaigns_docs:
+            camp_data = doc.to_dict()
+            context["campaigns"].append({
+                "id": doc.id,
+                "name": camp_data.get('name', ''),
+                "description": camp_data.get('description'),
+                "created_at": camp_data.get('created_at').isoformat() if camp_data.get('created_at') and hasattr(camp_data.get('created_at'), 'isoformat') else None
+            })
+        # Sort by created_at descending (limit to 50 most recent)
+        context["campaigns"].sort(key=lambda x: x.get('created_at') or '', reverse=True)
+        context["campaigns"] = context["campaigns"][:50]
         
         logger.info(f"Found {len(context['campaigns'])} campaigns")
         
-        # Fetch sessions
-        session_rows = db.execute(
-            '''SELECT id, name, campaign_id, started_at, ended_at, status 
-               FROM sessions 
-               WHERE user_id = ? 
-               ORDER BY started_at DESC 
-               LIMIT 50''',
-            (user_id,)
-        ).fetchall()
-        
-        context["sessions"] = [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "campaign_id": dict(row).get("campaign_id"),
-                "started_at": dict(row).get("started_at"),
-                "ended_at": dict(row).get("ended_at"),
-                "status": dict(row).get("status", "active")
-            }
-            for row in session_rows
-        ]
+        # Fetch sessions from Firestore
+        sessions_docs = db.collection('users').document(user_id).collection('sessions').stream()
+        for doc in sessions_docs:
+            session_data = doc.to_dict()
+            context["sessions"].append({
+                "id": doc.id,
+                "name": session_data.get('name', ''),
+                "campaign_id": session_data.get('campaign_id'),
+                "started_at": session_data.get('started_at').isoformat() if session_data.get('started_at') and hasattr(session_data.get('started_at'), 'isoformat') else None,
+                "ended_at": session_data.get('ended_at').isoformat() if session_data.get('ended_at') and hasattr(session_data.get('ended_at'), 'isoformat') else None,
+                "status": session_data.get('status', 'active')
+            })
+        # Sort by started_at descending (limit to 50 most recent)
+        context["sessions"].sort(key=lambda x: x.get('started_at') or '', reverse=True)
+        context["sessions"] = context["sessions"][:50]
         
         logger.info(f"Found {len(context['sessions'])} sessions")
         
-        # Fetch characters with their current HP from active sessions
-        character_rows = db.execute(
-            '''SELECT 
-                   c.id, 
-                   c.name, 
-                   c.max_hp, 
-                   c.race, 
-                   c.class_name, 
-                   c.level, 
-                   c.ac,
-                   c.campaign_id,
-                   COALESCE(sc.current_hp, c.max_hp) as current_hp
-               FROM characters c
-               LEFT JOIN session_characters sc ON c.id = sc.character_id 
-                   AND sc.session_id IN (
-                       SELECT id FROM sessions WHERE user_id = ? AND status = 'active'
-                   )
-               WHERE c.user_id = ?
-               ORDER BY c.created_at DESC
-               LIMIT 100''',
-            (user_id, user_id)
-        ).fetchall()
+        # Fetch characters from Firestore
+        characters_docs = db.collection('users').document(user_id).collection('characters').stream()
         
-        context["characters"] = [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "max_hp": row["max_hp"],
-                "current_hp": dict(row).get("current_hp") or row["max_hp"],
-                "race": dict(row).get("race"),
-                "class_name": dict(row).get("class_name"),
-                "level": dict(row).get("level"),
-                "ac": dict(row).get("ac"),
-                "campaign_id": dict(row).get("campaign_id")
-            }
-            for row in character_rows
+        # Get active sessions to check for current_hp
+        active_session_ids = [
+            sess["id"] for sess in context["sessions"] 
+            if sess.get("status") == "active"
         ]
+        
+        # Create a map of character_id -> current_hp from active sessions
+        character_hp_map = {}
+        for session_id in active_session_ids:
+            session_characters_ref = db.collection('users').document(user_id).collection('sessions').document(session_id).collection('session_characters')
+            session_characters_docs = session_characters_ref.stream()
+            for doc in session_characters_docs:
+                char_data = doc.to_dict()
+                char_id = char_data.get('character_id')
+                if char_id:
+                    current_hp = char_data.get('current_hp')
+                    if current_hp is not None:
+                        character_hp_map[str(char_id)] = current_hp
+        
+        for doc in characters_docs:
+            char_data = doc.to_dict()
+            char_id = doc.id
+            max_hp = char_data.get('max_hp', 0)
+            current_hp = character_hp_map.get(char_id, max_hp)
+            
+            created_at = char_data.get('created_at')
+            created_at_str = created_at.isoformat() if created_at and hasattr(created_at, 'isoformat') else None
+            
+            context["characters"].append({
+                "id": char_id,
+                "name": char_data.get('name', ''),
+                "max_hp": max_hp,
+                "current_hp": current_hp,
+                "race": char_data.get('race'),
+                "class_name": char_data.get('class_name'),
+                "level": char_data.get('level'),
+                "ac": char_data.get('ac'),
+                "campaign_id": char_data.get('campaign_id'),
+                "created_at": created_at_str
+            })
+        # Sort by created_at descending (limit to 100 most recent)
+        context["characters"].sort(key=lambda x: x.get('created_at') or '', reverse=True)
+        context["characters"] = context["characters"][:100]
         
         logger.info(f"Found {len(context['characters'])} characters")
         
@@ -113,6 +122,8 @@ async def get_user_context(user_id: str) -> Dict[str, Any]:
         
     except Exception as e:
         logger.error(f"Error gathering user context: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         # Return empty context on error rather than failing
         return {
             "campaigns": [],
@@ -121,75 +132,21 @@ async def get_user_context(user_id: str) -> Dict[str, Any]:
         }
 
 
-async def get_session_context(session_id: int, user_id: str) -> Optional[Dict[str, Any]]:
+async def get_session_context(session_id: str, user_id: str) -> Optional[Dict[str, Any]]:
     """
     Get detailed context for a specific session, including characters and recent events.
+    
+    NOTE: This function is deprecated - sessions/characters/events are stored in Firestore.
+    The session route handlers in routes/sessions.py handle Firestore queries directly.
     
     Args:
         session_id: The session ID
         user_id: The user ID for authorization
     
     Returns:
-        Dictionary with session details, characters, and events, or None if not found
+        None (deprecated function - use session routes directly)
     """
-    logger.info(f"Gathering context for session {session_id}")
-    
-    try:
-        db = get_database()
-        
-        # Get session
-        session_row = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session_row:
-            logger.warning(f"Session {session_id} not found for user {user_id}")
-            return None
-        
-        session = dict(session_row)
-        
-        # Get session characters
-        character_rows = db.execute(
-            '''SELECT 
-                   sc.*,
-                   c.name as character_name,
-                   c.max_hp
-               FROM session_characters sc
-               JOIN characters c ON sc.character_id = c.id
-               WHERE sc.session_id = ?''',
-            (session_id,)
-        ).fetchall()
-        
-        characters = [
-            {
-                "character_id": row["character_id"],
-                "character_name": row["character_name"],
-                "current_hp": dict(row).get("current_hp"),
-                "max_hp": row["max_hp"],
-                "starting_hp": dict(row).get("starting_hp")
-            }
-            for row in character_rows
-        ]
-        
-        # Get recent events (last 20)
-        event_rows = db.execute(
-            '''SELECT * FROM damage_events 
-               WHERE session_id = ? 
-               ORDER BY timestamp DESC 
-               LIMIT 20''',
-            (session_id,)
-        ).fetchall()
-        
-        events = [dict(row) for row in event_rows]
-        
-        return {
-            "session": session,
-            "characters": characters,
-            "events": events
-        }
-        
-    except Exception as e:
-        logger.error(f"Error gathering session context: {e}")
-        return None
+    logger.warning(f"get_session_context called but deprecated (session_id={session_id})")
+    # This function is no longer used - session data is queried directly from Firestore in routes
+    return None
 

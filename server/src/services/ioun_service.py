@@ -150,6 +150,131 @@ def clear_history(user_id: str, conversation_id: Optional[str] = None) -> None:
     logger.info(f"clear_history called for user {user_id}, conversation {conversation_id} (no-op with Firestore)")
 
 
+def get_conversation_mode_state(
+    user_id: str,
+    conversation_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get MODE state from conversation document in Firestore.
+    
+    Args:
+        user_id: User ID
+        conversation_id: Conversation ID. If None, returns default state.
+    
+    Returns:
+        Dictionary with mode state:
+        {
+            "mode": str | None,
+            "pending_events": List[str],
+            "current_event_data": Dict[str, Any],
+            "intent_detection_message": str | None
+        }
+    """
+    default_state = {
+        "mode": None,
+        "pending_events": [],
+        "current_event_data": {},
+        "intent_detection_message": None
+    }
+    
+    if not conversation_id:
+        logger.info(f"No conversation_id provided for user {user_id}, returning default MODE state")
+        return default_state
+    
+    try:
+        db = get_firestore()
+        if not db:
+            logger.warning("Firestore not initialized, returning default MODE state")
+            return default_state
+        
+        # Get conversation document
+        conv_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id)
+        conv_doc = conv_ref.get()
+        
+        if not conv_doc.exists:
+            logger.info(f"Conversation {conversation_id} does not exist, returning default MODE state")
+            return default_state
+        
+        conv_data = conv_doc.to_dict()
+        
+        # Extract MODE state fields
+        mode_state = {
+            "mode": conv_data.get("mode"),
+            "pending_events": conv_data.get("pending_events", []),
+            "current_event_data": conv_data.get("current_event_data", {}),
+            "intent_detection_message": conv_data.get("intent_detection_message")
+        }
+        
+        logger.info(f"Loaded MODE state for conversation {conversation_id}: mode={mode_state['mode']}, pending_events={len(mode_state['pending_events'])}")
+        return mode_state
+    except Exception as e:
+        logger.error(f"Error loading MODE state: {e}")
+        return default_state
+
+
+def update_conversation_mode_state(
+    user_id: str,
+    conversation_id: str,
+    mode: Optional[str] = None,
+    pending_events: Optional[List[str]] = None,
+    current_event_data: Optional[Dict[str, Any]] = None,
+    intent_detection_message: Optional[str] = None
+) -> None:
+    """
+    Update MODE state in conversation document in Firestore.
+    
+    Args:
+        user_id: User ID
+        conversation_id: Conversation ID
+        mode: Current MODE (None to clear)
+        pending_events: List of pending event types (None to keep unchanged)
+        current_event_data: Current event data (None to keep unchanged)
+        intent_detection_message: Message that triggered MODE entry (None to keep unchanged)
+    """
+    if not conversation_id:
+        logger.warning(f"No conversation_id provided, cannot update MODE state")
+        return
+    
+    try:
+        db = get_firestore()
+        if not db:
+            logger.warning("Firestore not initialized, cannot update MODE state")
+            return
+        
+        # Get conversation reference
+        conv_ref = db.collection('users').document(user_id).collection('conversations').document(conversation_id)
+        conv_doc = conv_ref.get()
+        
+        if not conv_doc.exists:
+            logger.warning(f"Conversation {conversation_id} does not exist, cannot update MODE state")
+            return
+        
+        # Build update data
+        update_data = {
+            'updated_at': firestore.SERVER_TIMESTAMP,
+        }
+        
+        if mode is not None:
+            update_data['mode'] = mode
+        if pending_events is not None:
+            update_data['pending_events'] = pending_events
+        if current_event_data is not None:
+            update_data['current_event_data'] = current_event_data
+        # Use empty string as sentinel to clear, None to keep unchanged
+        if intent_detection_message == "":
+            update_data['intent_detection_message'] = None  # Clear it
+        elif intent_detection_message is not None:
+            update_data['intent_detection_message'] = intent_detection_message
+        
+        # Update conversation document
+        conv_ref.update(update_data)
+        
+        logger.info(f"Updated MODE state for conversation {conversation_id}: mode={mode}, pending_events={pending_events}")
+    except Exception as e:
+        logger.error(f"Error updating MODE state: {e}")
+        # Don't raise - this is not critical for the chat to work
+
+
 async def chat_with_gemini(
     transcript: str,
     system_prompt: str,

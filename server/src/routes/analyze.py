@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 import logging
 from ..middleware.auth import authenticate_token
-from ..db.database import get_database
 from ..db.firebase import get_firestore
 from ..services.gemini_service import analyze_transcript
 from ..services.transcript_correction_service import correct_transcript
@@ -21,69 +20,74 @@ class AnalyzeRequest(BaseModel):
     session_id: str
 
 
-def _get_combat_context(db: Any, session_id: str) -> Dict[str, Any]:
+async def _get_combat_context(db_firestore: Any, user_id: str, session_id: str) -> Dict[str, Any]:
     """
-    Fetch combat context for a session.
+    Fetch combat context for a session from Firestore.
     
     Returns:
         Dictionary with combat context:
         {
-            "current_turn_character_id": int | None,
+            "current_turn_character_id": str | None,
             "current_turn_character_name": str | None,
             "active_characters": [
-                {"id": int, "name": str, "turn_order": int}
+                {"id": str, "name": str, "turn_order": int}
             ],
             "is_combat_active": bool
         }
     """
-    # Get combat state
-    combat_state = db.execute(
-        'SELECT * FROM combat_state WHERE session_id = ?',
-        (session_id,)
-    ).fetchone()
+    session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+    
+    # Get combat state from Firestore
+    combat_state_ref = session_ref.collection('combat_state').document('current')
+    combat_state_doc = combat_state_ref.get()
     
     is_combat_active = False
     current_turn_character_id = None
     current_turn_character_name = None
     
-    if combat_state and combat_state['is_active']:
-        is_combat_active = True
-        current_turn_character_id = combat_state['current_turn_character_id']
+    if combat_state_doc.exists:
+        combat_state_data = combat_state_doc.to_dict()
+        is_combat_active = combat_state_data.get('is_active', False)
+        current_turn_character_id = combat_state_data.get('current_turn_character_id')
         
         # Get current turn character name if available
         if current_turn_character_id:
-            character = db.execute(
-                'SELECT name FROM characters WHERE id = ?',
-                (current_turn_character_id,)
-            ).fetchone()
-            if character:
-                current_turn_character_name = character['name']
+            char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(current_turn_character_id))
+            char_doc = char_ref.get()
+            if char_doc.exists:
+                char_data = char_doc.to_dict()
+                current_turn_character_name = char_data.get('name')
     
     # Get active characters in initiative order
     active_characters = []
     if is_combat_active:
-        initiative_rows = db.execute('''
-            SELECT 
-                io.character_id,
-                io.turn_order,
-                c.name
-            FROM initiative_order io
-            JOIN characters c ON io.character_id = c.id
-            WHERE io.session_id = ?
-            ORDER BY io.turn_order ASC
-        ''', (session_id,)).fetchall()
+        initiative_order_ref = session_ref.collection('initiative_order')
+        all_orders = list(initiative_order_ref.stream())
         
-        active_characters = [
-            {
-                "id": row['character_id'],
-                "name": row['name'],
-                "turn_order": row['turn_order']
-            }
-            for row in initiative_rows
-        ]
+        for doc in all_orders:
+            data = doc.to_dict()
+            character_id = data.get('character_id')
+            character_name = data.get('character_name', 'Unknown')
+            
+            # If character_name not in initiative_order, fetch from characters collection
+            if not character_name or character_name == 'Unknown':
+                char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(character_id))
+                char_doc = char_ref.get()
+                if char_doc.exists:
+                    char_data = char_doc.to_dict()
+                    character_name = char_data.get('name', 'Unknown')
+            
+            active_characters.append({
+                "id": str(character_id),
+                "name": character_name,
+                "turn_order": data.get('turn_order', 0)
+            })
+        
+        # Sort by turn_order
+        active_characters.sort(key=lambda x: x.get('turn_order', 0))
     
     return {
-        "current_turn_character_id": current_turn_character_id,
+        "current_turn_character_id": str(current_turn_character_id) if current_turn_character_id else None,
         "current_turn_character_name": current_turn_character_name,
         "active_characters": active_characters,
         "is_combat_active": is_combat_active
@@ -138,9 +142,6 @@ async def analyze(
                     'current_hp': char_data.get('current_hp', char_details.get('max_hp', 100))
                 })
         
-        # Also need SQLite db for combat context and event saving
-        db = get_database()
-        
         if not characters:
             logger.warning(f"No characters found in session {request.session_id}")
             raise HTTPException(
@@ -166,21 +167,8 @@ async def analyze(
         else:
             logger.info("🔍 No marker found in transcript, analyzing full transcript")
         
-        # Get combat context for transcript correction and analysis
-        # Note: Combat state is still in SQLite, so we need to try converting session_id to int
-        # If conversion fails, combat context will be empty (combat not active)
-        try:
-            session_id_int = int(request.session_id)
-            combat_context = _get_combat_context(db, session_id_int)
-        except (ValueError, TypeError):
-            # Session ID is a string that can't be converted to int, combat context unavailable
-            logger.warning(f"Session ID {request.session_id} cannot be converted to int for combat context")
-            combat_context = {
-                "current_turn_character_id": None,
-                "current_turn_character_name": None,
-                "active_characters": [],
-                "is_combat_active": False
-            }
+        # Get combat context for transcript correction and analysis from Firestore
+        combat_context = await _get_combat_context(db_firestore, user_id, request.session_id)
         if combat_context['is_combat_active']:
             logger.info(f"⚔️  Combat is active - Current turn: {combat_context['current_turn_character_name'] or 'None'}, Active characters: {len(combat_context['active_characters'])}")
         else:
