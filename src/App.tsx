@@ -125,11 +125,13 @@ const App = () => {
           
             
           
+         
+         
           <Route
-            path="/voice-assistant"
+            path="/ioun-silence/:conversationId?"
             element={
               <ProtectedRoute>
-                <SectionShell title="Voice Assistant" subtitle="AI-powered D&D assistant">
+                <SectionShell title="Ioun" subtitle="AI-powered D&D assistant with faster silence detection">
                   <VoiceAssistant />
                 </SectionShell>
               </ProtectedRoute>

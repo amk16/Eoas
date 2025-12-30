@@ -29,6 +29,23 @@ class CharacterCreate(BaseModel):
     notes: Optional[str] = None
     display_art_url: Optional[str] = None
     art_prompt: Optional[str] = None
+    # Stats (optional)
+    strength_base: Optional[int] = None
+    strength_bonus: Optional[int] = None
+    dexterity_base: Optional[int] = None
+    dexterity_bonus: Optional[int] = None
+    wisdom_base: Optional[int] = None
+    wisdom_bonus: Optional[int] = None
+    intelligence_base: Optional[int] = None
+    intelligence_bonus: Optional[int] = None
+    constitution_base: Optional[int] = None
+    constitution_bonus: Optional[int] = None
+    charisma_base: Optional[int] = None
+    charisma_bonus: Optional[int] = None
+    # Flavour (optional)
+    style: Optional[str] = None
+    clothing: Optional[str] = None
+    expression: Optional[str] = None
 
 
 class CharacterUpdate(BaseModel):
@@ -46,6 +63,23 @@ class CharacterUpdate(BaseModel):
     notes: Optional[str] = None
     display_art_url: Optional[str] = None
     art_prompt: Optional[str] = None
+    # Stats (optional)
+    strength_base: Optional[int] = None
+    strength_bonus: Optional[int] = None
+    dexterity_base: Optional[int] = None
+    dexterity_bonus: Optional[int] = None
+    wisdom_base: Optional[int] = None
+    wisdom_bonus: Optional[int] = None
+    intelligence_base: Optional[int] = None
+    intelligence_bonus: Optional[int] = None
+    constitution_base: Optional[int] = None
+    constitution_bonus: Optional[int] = None
+    charisma_base: Optional[int] = None
+    charisma_bonus: Optional[int] = None
+    # Flavour (optional)
+    style: Optional[str] = None
+    clothing: Optional[str] = None
+    expression: Optional[str] = None
 
 
 @router.get('/')
@@ -186,6 +220,21 @@ async def create_character(character: CharacterCreate, user_id: str = Depends(au
             'notes': character.notes,
             'display_art_url': character.display_art_url,
             'art_prompt': character.art_prompt,
+            'strength_base': character.strength_base,
+            'strength_bonus': character.strength_bonus,
+            'dexterity_base': character.dexterity_base,
+            'dexterity_bonus': character.dexterity_bonus,
+            'wisdom_base': character.wisdom_base,
+            'wisdom_bonus': character.wisdom_bonus,
+            'intelligence_base': character.intelligence_base,
+            'intelligence_bonus': character.intelligence_bonus,
+            'constitution_base': character.constitution_base,
+            'constitution_bonus': character.constitution_bonus,
+            'charisma_base': character.charisma_base,
+            'charisma_bonus': character.charisma_bonus,
+            'style': character.style,
+            'clothing': character.clothing,
+            'expression': character.expression,
             'created_at': firestore.SERVER_TIMESTAMP,
             'updated_at': firestore.SERVER_TIMESTAMP,
         }
@@ -288,6 +337,21 @@ async def update_character(
             'notes': character.notes,
             'display_art_url': character.display_art_url,
             'art_prompt': character.art_prompt,
+            'strength_base': character.strength_base,
+            'strength_bonus': character.strength_bonus,
+            'dexterity_base': character.dexterity_base,
+            'dexterity_bonus': character.dexterity_bonus,
+            'wisdom_base': character.wisdom_base,
+            'wisdom_bonus': character.wisdom_bonus,
+            'intelligence_base': character.intelligence_base,
+            'intelligence_bonus': character.intelligence_bonus,
+            'constitution_base': character.constitution_base,
+            'constitution_bonus': character.constitution_bonus,
+            'charisma_base': character.charisma_base,
+            'charisma_bonus': character.charisma_bonus,
+            'style': character.style,
+            'clothing': character.clothing,
+            'expression': character.expression,
             'updated_at': firestore.SERVER_TIMESTAMP,
         }
         

@@ -200,7 +200,95 @@ body {
   * {
     @apply border-border outline-ring/50;
   }
+  /* Exclude SVG elements from border - they handle their own borders via stroke */
+  svg {
+    border: none !important;
+  }
   body {
     @apply bg-background text-foreground;
   }
+}
+
+/* Voice Assistant Button Animations */
+@keyframes voiceButtonPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: .5;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 1;
+  }
+}
+
+@keyframes voiceButtonRipple {
+  0% {
+    transform: translate(-50%, -50%) scale(0);
+    opacity: 0.9;
+  }
+  40% {
+    opacity: 0.9;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(var(--ripple-max-scale, 2));
+    opacity: .9;
+  }
+}
+
+/* Phase 5: 5-Segment Outer Ring Animations */
+
+/* Rotation animation for all segments as a group */
+@keyframes segmentsRotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Segment shrink animation - segments reduce length to create gaps */
+/* Arc length for 72° ≈ 57.8, for 40° ≈ 32.1 (radius 46) */
+@keyframes segmentShrink {
+  0% {
+    stroke-dasharray: 57.8 0;
+  }
+  100% {
+    stroke-dasharray: 32.1 25.7;
+  }
+}
+
+/* Segment grow animation - segments expand to touch each other */
+@keyframes segmentGrow {
+  0% {
+    stroke-dasharray: 32.1 25.7;
+  }
+  100% {
+    stroke-dasharray: 57.8 0;
+  }
+}
+
+/* Idle state - segments at full length (touching) */
+.idle-state-outer path {
+  stroke-dasharray: 57.8 0;
+}
+
+/* Listening state - segments shrink then rotate */
+.listening-state-outer {
+  transform-origin: center;
+  animation: segmentsRotate var(--spin-duration, 2s) linear infinite;
+  animation-delay: var(--shrink-duration, 0.5s);
+}
+
+.listening-state-outer path {
+  animation: segmentShrink var(--shrink-duration, 0.5s) ease-out forwards;
+}
+
+/* Ending conversation state - segments grow back to full length */
+.ending-conversation-outer {
+  transform-origin: center;
+}
+
+.ending-conversation-outer path {
+  animation: segmentGrow var(--grow-duration, 0.6s) ease-out forwards;
 }

@@ -1,8 +1,10 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { Plus } from 'lucide-react';
 import api from '../../services/api';
 import type { Campaign, Character, Session } from '../../types';
 import CharacterDetailSidebar from '../characters/CharacterDetailSidebar';
+import Drawer from '../ui/Drawer';
 
 export default function CampaignView() {
   const { id } = useParams<{ id: string }>();
@@ -14,6 +16,11 @@ export default function CampaignView() {
   const [error, setError] = useState('');
   const [generatingArt, setGeneratingArt] = useState(false);
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
+  const [addCharacterDrawerOpen, setAddCharacterDrawerOpen] = useState(false);
+  const [availableCharacters, setAvailableCharacters] = useState<Character[]>([]);
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>([]);
+  const [addingCharacters, setAddingCharacters] = useState(false);
+  const [addCharacterError, setAddCharacterError] = useState('');
 
   const selectedCharacter = useMemo(() => {
     if (!selectedCharacterId) return null;
@@ -127,6 +134,91 @@ export default function CampaignView() {
     return `https://via.placeholder.com/512x512/000000/FFFFFF?text=${encodeURIComponent(character.name || 'Character')}`;
   };
 
+  const fetchAvailableCharacters = async () => {
+    try {
+      const response = await api.get('/characters');
+      const allCharacters = response.data;
+      // Filter out characters already in this campaign
+      const campaignCharacterIds = new Set(characters.map(c => c.id));
+      const available = allCharacters.filter((c: Character) => !campaignCharacterIds.has(c.id));
+      setAvailableCharacters(available);
+      setAddCharacterError('');
+    } catch (err: any) {
+      setAddCharacterError(err.response?.data?.error || 'Failed to load characters');
+    }
+  };
+
+  const handleOpenAddCharacterDrawer = () => {
+    setAddCharacterDrawerOpen(true);
+    setSelectedCharacterIds([]);
+    fetchAvailableCharacters();
+  };
+
+  const handleCloseAddCharacterDrawer = () => {
+    setAddCharacterDrawerOpen(false);
+    setSelectedCharacterIds([]);
+    setAddCharacterError('');
+  };
+
+  const handleToggleCharacter = (characterId: string) => {
+    setSelectedCharacterIds((prev) =>
+      prev.includes(characterId)
+        ? prev.filter((id) => id !== characterId)
+        : [...prev, characterId]
+    );
+  };
+
+  const handleAddCharactersToCampaign = async () => {
+    if (selectedCharacterIds.length === 0) {
+      setAddCharacterError('Please select at least one character');
+      return;
+    }
+
+    if (!campaign) return;
+
+    setAddingCharacters(true);
+    setAddCharacterError('');
+
+    try {
+      // Update each selected character's campaign_id
+      await Promise.all(
+        selectedCharacterIds.map(async (characterId) => {
+          // First get the character to preserve all its data
+          const charResponse = await api.get(`/characters/${characterId}`);
+          const character = charResponse.data;
+          
+          // Update with campaign_id set
+          await api.put(`/characters/${characterId}`, {
+            name: character.name,
+            max_hp: character.max_hp,
+            campaign_id: campaign.id,
+            race: character.race || null,
+            class_name: character.class_name || null,
+            level: character.level || null,
+            ac: character.ac || null,
+            initiative_bonus: character.initiative_bonus || null,
+            temp_hp: character.temp_hp || null,
+            background: character.background || null,
+            alignment: character.alignment || null,
+            notes: character.notes || null,
+            display_art_url: character.display_art_url || null,
+            art_prompt: character.art_prompt || null,
+          });
+        })
+      );
+
+      // Refresh campaign data to show newly added characters
+      await fetchCampaign();
+      
+      // Close drawer and reset selection
+      handleCloseAddCharacterDrawer();
+    } catch (err: any) {
+      setAddCharacterError(err.response?.data?.error || 'Failed to add characters to campaign');
+    } finally {
+      setAddingCharacters(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="text-center py-8">
@@ -222,91 +314,94 @@ export default function CampaignView() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-6">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-semibold text-white">Characters</h2>
-            <Link
-              to={`/characters?drawer=new&campaignId=${campaign.id}`}
-              className="text-sm px-3 py-2 bg-white text-black rounded-xl hover:bg-neutral-200 transition-colors font-medium"
-            >
-              Add Character
-            </Link>
-          </div>
-          {characters.length === 0 ? (
-            <p className="text-neutral-300">No characters in this campaign yet.</p>
-          ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              {characters.map((character) => (
-                <div
-                  key={character.id}
-                  onClick={() => handleCharacterCardClick(character.id)}
-                  className="bg-black border border-neutral-800 cursor-pointer hover:border-neutral-700 transition-colors overflow-hidden"
-                >
-                  {/* Character Art Image */}
-                  <div className="aspect-square bg-neutral-950 relative">
-                    <img
-                      src={getCharacterImageUrl(character)}
-                      alt={character.name}
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        // Fallback if image fails to load
-                        const target = e.target as HTMLImageElement;
-                        target.style.display = 'none';
-                      }}
-                    />
-                  </div>
-                  
-                  {/* Character Info */}
-                  <div className="p-3">
-                    <h3 className="text-white font-semibold text-sm mb-1 truncate">
-                      {character.name}
-                    </h3>
-                    <p className="text-neutral-400 text-xs">
-                      HP: {character.max_hp}
-                      {character.level && ` • Lv.${character.level}`}
-                    </p>
-                  </div>
+          <h2 className="text-xl font-semibold text-white mb-4">Characters</h2>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {characters.map((character) => (
+              <div
+                key={character.id}
+                onClick={() => handleCharacterCardClick(character.id)}
+                className="bg-black border border-neutral-800 cursor-pointer hover:border-neutral-700 transition-colors overflow-hidden"
+              >
+                {/* Character Art Image */}
+                <div className="aspect-square bg-neutral-950 relative">
+                  <img
+                    src={getCharacterImageUrl(character)}
+                    alt={character.name}
+                    className="w-full h-full object-cover"
+                    onError={(e) => {
+                      // Fallback if image fails to load
+                      const target = e.target as HTMLImageElement;
+                      target.style.display = 'none';
+                    }}
+                  />
                 </div>
-              ))}
-            </div>
-          )}
+                
+                {/* Character Info */}
+                <div className="p-3">
+                  <h3 className="text-white font-semibold text-sm mb-1 truncate">
+                    {character.name}
+                  </h3>
+                  <p className="text-neutral-400 text-xs">
+                    HP: {character.max_hp}
+                    {character.level && ` • Lv.${character.level}`}
+                  </p>
+                </div>
+              </div>
+            ))}
+            <button
+              onClick={handleOpenAddCharacterDrawer}
+              className="bg-black border border-neutral-800 cursor-pointer hover:border-neutral-700 transition-colors overflow-hidden"
+            >
+              {/* Empty Character Card Image Area */}
+              <div className="aspect-square bg-neutral-950 relative flex items-center justify-center">
+                <Plus className="text-neutral-500" size={32} />
+              </div>
+              
+              {/* Character Info */}
+              <div className="p-3">
+                <h3 className="text-white font-semibold text-sm mb-1">
+                  Add Character
+                </h3>
+              </div>
+            </button>
+          </div>
         </div>
 
         <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-6">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-xl font-semibold text-white">Sessions</h2>
-            <Link
-              to={`/sessions?drawer=new&campaignId=${campaign.id}`}
-              className="text-sm px-3 py-2 bg-white text-black rounded-xl hover:bg-neutral-200 transition-colors font-medium"
-            >
-              New Session
-            </Link>
-          </div>
-          {sessions.length === 0 ? (
-            <p className="text-neutral-300">No sessions in this campaign yet.</p>
-          ) : (
-            <ul className="space-y-2">
-              {sessions.map((session) => (
-                <li
-                  key={session.id}
-                  className="flex justify-between items-center p-3 hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10"
+          <h2 className="text-xl font-semibold text-white mb-4">Sessions</h2>
+          <ul className="space-y-2">
+            {sessions.map((session) => (
+              <li
+                key={session.id}
+                className="flex justify-between items-center p-3 hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10"
+              >
+                <Link
+                  to={`/sessions/${session.id}`}
+                  className="text-white/90 hover:text-white transition-colors"
                 >
-                  <Link
-                    to={`/sessions/${session.id}`}
-                    className="text-white/90 hover:text-white transition-colors"
-                  >
-                    {session.name}
-                  </Link>
-                  <span className={`text-sm px-2 py-1 rounded-full border ${
-                    session.status === 'active'
-                      ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30'
-                      : 'bg-white/10 text-white/70 border-white/15'
-                  }`}>
-                    {session.status}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+                  {session.name}
+                </Link>
+                <span className={`text-sm px-2 py-1 rounded-full border ${
+                  session.status === 'active'
+                    ? 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30'
+                    : 'bg-white/10 text-white/70 border-white/15'
+                }`}>
+                  {session.status}
+                </span>
+              </li>
+            ))}
+            <li>
+              <Link
+                to={`/sessions?drawer=new&campaignId=${campaign.id}`}
+                className="flex justify-between items-center p-3 hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10"
+              >
+                <span className="text-white/90 hover:text-white transition-colors">
+                  New Session
+                </span>
+                <Plus className="text-neutral-400" size={18} />
+              </Link>
+            </li>
+          </ul>
         </div>
       </div>
 
@@ -318,6 +413,69 @@ export default function CampaignView() {
         onDelete={handleSidebarDelete}
         onUpdate={handleSidebarUpdate}
       />
+
+      <Drawer
+        open={addCharacterDrawerOpen}
+        title="Add Characters to Campaign"
+        description="Select existing characters to add to this campaign"
+        onClose={handleCloseAddCharacterDrawer}
+        footer={
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={handleCloseAddCharacterDrawer}
+              className="px-4 py-2 bg-white/5 text-white border border-white/10 rounded-xl hover:bg-white/10 transition-colors text-sm font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleAddCharactersToCampaign}
+              disabled={addingCharacters || selectedCharacterIds.length === 0}
+              className="px-4 py-2 bg-white text-black rounded-xl hover:bg-neutral-200 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {addingCharacters ? 'Adding...' : `Add ${selectedCharacterIds.length} Character${selectedCharacterIds.length !== 1 ? 's' : ''}`}
+            </button>
+          </div>
+        }
+      >
+        {addCharacterError && (
+          <div className="bg-red-950/40 border border-red-900 text-red-200 px-4 py-3 rounded-xl mb-4">
+            {addCharacterError}
+          </div>
+        )}
+
+        {availableCharacters.length === 0 ? (
+          <div className="text-center py-8">
+            <p className="text-neutral-300">No available characters to add. All your characters are already in this campaign.</p>
+          </div>
+        ) : (
+          <div className="space-y-2 max-h-[60vh] overflow-y-auto">
+            {availableCharacters.map((character) => (
+              <label
+                key={character.id}
+                className="flex items-center p-3 hover:bg-white/5 rounded-lg cursor-pointer border border-transparent hover:border-white/10 transition-colors"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedCharacterIds.includes(character.id)}
+                  onChange={() => handleToggleCharacter(character.id)}
+                  className="h-4 w-4 accent-white rounded"
+                />
+                <div className="ml-3 flex-1">
+                  <div className="text-sm font-medium text-white">
+                    {character.name}
+                  </div>
+                  <div className="text-sm text-neutral-400">
+                    Max HP: {character.max_hp}
+                    {character.level && ` • Level ${character.level}`}
+                    {character.race && ` • ${character.race}`}
+                    {character.class_name && ` • ${character.class_name}`}
+                  </div>
+                </div>
+              </label>
+            ))}
+          </div>
+        )}
+      </Drawer>
     </div>
   );
 }
