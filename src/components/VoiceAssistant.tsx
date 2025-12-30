@@ -2,7 +2,6 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { EnhancedResponse } from './voice-assistant/EnhancedResponse';
 import { chatWithIoun, executeCreations, type CreationRequest } from '../services/iounService';
-import { useAuth } from '../context/AuthContext';
 import { getGlowIntensity, getSpinDuration, LISTENING_ANIMATION_TIMING, END_CONVERSATION_ANIMATION_TIMING, GLOW_CONFIG, RIPPLE_CONFIG } from './voice-assistant/buttonAnimations';
 import { generateIdleSegments } from './voice-assistant/arcUtils';
 import { IDLE_HINT_CONFIG } from './voice-assistant/idleHintConfig';
