@@ -113,7 +113,7 @@ async def chat_with_ioun(
                     if request.conversation_id:
                         update_conversation_mode_state(
                             user_id, request.conversation_id,
-                            mode=None,
+                            mode="",  # Sentinel value to clear mode
                             pending_events=[],
                             current_event_data={},
                             intent_detection_message=""  # Clear it
@@ -147,7 +147,7 @@ async def chat_with_ioun(
                             if request.conversation_id:
                                 update_conversation_mode_state(
                                     user_id, request.conversation_id,
-                                    mode=None,
+                                    mode="",  # Sentinel value to clear mode
                                     pending_events=[],
                                     current_event_data={},
                                     intent_detection_message=""  # Clear it
@@ -159,7 +159,7 @@ async def chat_with_ioun(
                         if request.conversation_id:
                             update_conversation_mode_state(
                                 user_id, request.conversation_id,
-                                mode=None,
+                                mode="",  # Sentinel value to clear mode
                                 pending_events=[],
                                 current_event_data={},
                                 intent_detection_message=""  # Clear it
@@ -235,7 +235,7 @@ async def chat_with_ioun(
                         if request.conversation_id:
                             update_conversation_mode_state(
                                 user_id, request.conversation_id,
-                                mode=current_mode,
+                                mode="" if current_mode is None else current_mode,  # Use sentinel to clear if None
                                 pending_events=pending_events,
                                 current_event_data=current_event_data,
                                 intent_detection_message=intent_detection_message

@@ -21,3 +21,4 @@ export const IDLE_HINT_CONFIG = {
   className: 'text-sm text-neutral-400 mt-4 text-center',
 } as const;
 
+

@@ -92,14 +92,17 @@ export default function VoiceAssistant() {
     setIsScribeActive(false);
     setIsProcessing(false);
     
-    // Clear refs
-    conversationHistoryRef.current = [];
-    accumulatedTranscriptRef.current = '';
-    lastCommittedTranscriptRef.current = '';
-    recentTranscriptsRef.current = [];
-    processedSilenceTranscriptRef.current = '';
-    isProcessingRef.current = false;
-    pendingSilenceTriggerRef.current = false;
+      // Clear refs
+      conversationHistoryRef.current = [];
+      accumulatedTranscriptRef.current = '';
+      lastCommittedTranscriptRef.current = '';
+      recentTranscriptsRef.current = [];
+      logger.debug('[mount effect] Clearing processedSilenceTranscriptRef', {
+        previousValue: processedSilenceTranscriptRef.current,
+      });
+      processedSilenceTranscriptRef.current = '';
+      isProcessingRef.current = false;
+      pendingSilenceTriggerRef.current = false;
     
     // Navigate to base URL immediately
     navigate('/ioun-silence', { replace: true });
@@ -210,6 +213,9 @@ export default function VoiceAssistant() {
       accumulatedTranscriptRef.current = '';
       lastCommittedTranscriptRef.current = '';
       recentTranscriptsRef.current = [];
+      logger.debug('[startNewConversation] Clearing processedSilenceTranscriptRef', {
+        previousValue: processedSilenceTranscriptRef.current,
+      });
       processedSilenceTranscriptRef.current = '';
       setPendingCreationRequests([]);
       clearSilenceTimer();
@@ -233,6 +239,7 @@ export default function VoiceAssistant() {
   // Clear silence timer
   const clearSilenceTimer = () => {
     if (silenceTimerRef.current) {
+      logger.debug('[clearSilenceTimer] Clearing existing timer');
       clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = null;
     }
@@ -241,64 +248,112 @@ export default function VoiceAssistant() {
   // Reset silence timer (3 seconds after last committed transcript)
   const resetSilenceTimer = () => {
     clearSilenceTimer();
-    const currentTranscript = accumulatedTranscriptRef.current.trim();
     
-    if (isScribeActive && !isProcessing && currentTranscript) {
-      silenceTimerRef.current = setTimeout(() => {
-        const transcriptAtExpiry = accumulatedTranscriptRef.current.trim();
-        if (transcriptAtExpiry && !isProcessing) {
-          handleSilence();
-        }
-      }, 3000);
+    // Don't set timer if already processing
+    if (isProcessingRef.current) return;
+
+    const currentTranscript = accumulatedTranscriptRef.current.trim();
+    if (!currentTranscript || currentTranscript === processedSilenceTranscriptRef.current) {
+        return;
     }
+
+    silenceTimerRef.current = setTimeout(() => {
+        // Double check lock inside the callback
+        if (isProcessingRef.current) return;
+        
+        // Double check transcript status
+        const transcriptAtExpiry = accumulatedTranscriptRef.current.trim();
+        if (transcriptAtExpiry && transcriptAtExpiry !== processedSilenceTranscriptRef.current) {
+            logger.info('[resetSilenceTimer] Timer expired - calling handleSilence()');
+            handleSilence();
+        }
+    }, 3000);
   };
 
   // Handle silence - send accumulated transcript to backend
   const handleSilence = async () => {
-    const transcript = accumulatedTranscriptRef.current.trim();
-    
-    // Safety check: Don't process empty transcripts or if already processing
-    if (!transcript || isProcessingRef.current) {
+    // 1. ATOMIC LOCK & VALIDATION
+    // Check lock synchronously first
+    if (isProcessingRef.current) {
+      logger.warn('[handleSilence] Blocked: Already processing');
       return;
     }
 
-    // Reset pending flag since we are handling it now
-    pendingSilenceTriggerRef.current = false;
+    const transcript = accumulatedTranscriptRef.current.trim();
+    
+    // Check if empty
+    if (!transcript) {
+      logger.debug('[handleSilence] Blocked: Empty transcript');
+      return;
+    }
 
+    // Check if already processed (Deduplication)
+    if (transcript === processedSilenceTranscriptRef.current) {
+      logger.warn('[handleSilence] Blocked: Transcript matches last processed text', {
+        transcript,
+        processed: processedSilenceTranscriptRef.current
+      });
+      // Clear accumulated to prevent timer loops on old text
+      accumulatedTranscriptRef.current = '';
+      return;
+    }
+
+    // 2. ACQUIRE LOCK & UPDATE STATE IMMEDIATELY
+    // Set lock
     isProcessingRef.current = true;
     setIsProcessing(true);
-    pendingSilenceTriggerRef.current = false;
-
+    
+    // Clear timer immediately
     clearSilenceTimer();
+    
+    // Stop any currently playing audio when sending request
+    stopTTSAudio();
 
+    // COMMIT STATE NOW - Before any async operation
+    // This prevents handleTranscript or resetSilenceTimer from acting on this text again
+    const currentTranscriptToProcess = transcript;
+    processedSilenceTranscriptRef.current = currentTranscriptToProcess;
     
+    // Clear accumulator immediately
+    accumulatedTranscriptRef.current = '';
+    lastCommittedTranscriptRef.current = ''; // Clear committed to allow new distinctive text
+    recentTranscriptsRef.current = [];
     
+    // Reset pending flag since we are handling it now
+    pendingSilenceTriggerRef.current = false;
+    
+    const timestamp = Date.now();
+    
+    logger.debug('[handleSilence] State committed before async operation', {
+      transcript: currentTranscriptToProcess,
+      timestamp,
+    });
+
     try {
-      logger.debug('Processing silence - sending transcript to backend', { transcriptLength: transcript.length });
+      logger.info('[handleSilence] SENDING REQUEST TO BACKEND', {
+        transcript: currentTranscriptToProcess,
+        conversationId: currentConversationIdRef.current,
+        timestamp,
+      });
       
-      // Require an existing conversation - use ref for synchronous access
       const conversationId = currentConversationIdRef.current;
       if (!conversationId) {
-        logger.error('No conversation ID available. Please start a new conversation first.');
         throw new Error('No active conversation. Please click "New Chat" to start a conversation.');
       }
       
-      // Note: Messages are saved by the backend via add_to_history in ioun.py
-      // No need to save here to avoid duplicates
+      // 3. ASYNC OPERATION
+      const response = await chatWithIoun(currentTranscriptToProcess, undefined, conversationId);
       
-      const response = await chatWithIoun(transcript, undefined, conversationId);
-      
-      // Add user message to display (if not already shown)
+      // ... Handle Response (UI updates) ...
       const userMessageId = `user-${Date.now()}-${Math.random()}`;
       setMessages(prev => [...prev, {
         id: userMessageId,
         type: 'user',
-        text: transcript,
+        text: currentTranscriptToProcess,
         timestamp: new Date(),
         isStreaming: false
       }]);
       
-      // Add assistant message
       const assistantMessageId = `assistant-${Date.now()}-${Math.random()}`;
       setMessages(prev => [...prev, {
         id: assistantMessageId,
@@ -308,37 +363,33 @@ export default function VoiceAssistant() {
         isStreaming: false
       }]);
 
-      conversationHistoryRef.current.push({ role: 'user', content: transcript });
+      conversationHistoryRef.current.push({ role: 'user', content: currentTranscriptToProcess });
       conversationHistoryRef.current.push({ role: 'assistant', content: response.response });
-      
-      // Note: Messages are saved by the backend via add_to_history in ioun.py
-      // No need to save here to avoid duplicates
-      
-      // Clear accumulated transcript
-      accumulatedTranscriptRef.current = '';
-      lastCommittedTranscriptRef.current = '';
-      recentTranscriptsRef.current = [];
 
-      setTimeout(() => {
-        processedSilenceTranscriptRef.current = '';
-      }, 5000);
-      
       if (response.audio_base64) {
         playTTSAudio(response.audio_base64);
       }
       
-      // Handle creation requests if detected
       if (response.creation_requests && response.creation_requests.length > 0) {
-        logger.info('Detected creation requests', { count: response.creation_requests.length });
         setPendingCreationRequests(response.creation_requests);
       }
+
     } catch (err: any) {
-      logger.error('Error processing silence', err);
+      logger.error('[handleSilence] Error processing silence', err);
       setError(err.message || 'Failed to process transcript');
+      
+      // Optional: If it failed, do we want to allow retrying this specific text?
+      // If yes, clear processedSilenceTranscriptRef.current here. 
+      // generally safer to leave it set to prevent error loops.
     } finally {
+      // 4. RELEASE LOCK
       isProcessingRef.current = false;
       setIsProcessing(false);
-
+      
+      // Start a cleanup timer for the deduplication ref if needed, 
+      // but usually better to keep it until new text arrives.
+      // We do NOT clear accumulatedTranscriptRef here, as the user might 
+      // have started talking again during the API call.
     }
   };
   
@@ -439,48 +490,118 @@ export default function VoiceAssistant() {
 
   // Handle transcript from LiveScribeSilence (committed transcripts)
   const handleTranscript = (transcript: string) => {
-    if (!transcript || !transcript.trim()) return;
+    logger.debug('[handleTranscript] Entry', {
+      transcript: transcript,
+      transcriptLength: transcript?.length || 0,
+      transcriptTrimmed: transcript?.trim() || '',
+      transcriptTrimmedLength: transcript?.trim().length || 0,
+    });
 
-    if (processedSilenceTranscriptRef.current === transcript) {
-        return;
+    if (!transcript || !transcript.trim()) {
+      logger.debug('[handleTranscript] Empty transcript, returning early');
+      return;
+    }
+
+    const processedSilenceTranscript = processedSilenceTranscriptRef.current;
+    const stringMatch = processedSilenceTranscript === transcript;
+    const stringMatchTrimmed = processedSilenceTranscript.trim() === transcript.trim();
+    
+    logger.debug('[handleTranscript] String comparison check', {
+      processedSilenceTranscript: processedSilenceTranscript,
+      processedSilenceTranscriptLength: processedSilenceTranscript.length,
+      processedSilenceTranscriptTrimmed: processedSilenceTranscript.trim(),
+      transcript: transcript,
+      transcriptLength: transcript.length,
+      transcriptTrimmed: transcript.trim(),
+      exactMatch: stringMatch,
+      trimmedMatch: stringMatchTrimmed,
+      willSkip: stringMatch,
+    });
+
+    if (stringMatch) {
+      logger.warn('[handleTranscript] SKIPPING - transcript matches processedSilenceTranscriptRef', {
+        transcript: transcript,
+        processedSilenceTranscript: processedSilenceTranscript,
+        reason: 'Already processed via silence detection',
+      });
+      return;
     }
     
-    if (isPlayingAudio) stopTTSAudio();
+    if (isPlayingAudio) {
+      logger.debug('[handleTranscript] Stopping audio playback');
+      stopTTSAudio();
+    }
     
     const isNewTranscript = transcript !== lastCommittedTranscriptRef.current;
     
+    logger.debug('[handleTranscript] Transcript processing', {
+      isNewTranscript: isNewTranscript,
+      lastCommittedTranscript: lastCommittedTranscriptRef.current,
+      currentAccumulatedBefore: accumulatedTranscriptRef.current,
+      isProcessing: isProcessingRef.current,
+    });
+    
     if (isNewTranscript) {
       // 1. Accumulate the text
+      const previousAccumulated = accumulatedTranscriptRef.current;
       if (accumulatedTranscriptRef.current) {
         accumulatedTranscriptRef.current += ' ' + transcript;
+        logger.debug('[handleTranscript] Appended to accumulated transcript', {
+          previous: previousAccumulated,
+          added: transcript,
+          new: accumulatedTranscriptRef.current,
+        });
       } else {
         accumulatedTranscriptRef.current = transcript;
+        logger.debug('[handleTranscript] Set accumulated transcript (was empty)', {
+          new: transcript,
+        });
       }
       lastCommittedTranscriptRef.current = transcript;
 
       // Standard flow: User might still be talking, reset timer
-      resetSilenceTimer();
+      // BUT: Don't reset timer if we're already processing a request
+      if (isProcessingRef.current) {
+        logger.debug('[handleTranscript] Skipping resetSilenceTimer() - already processing a request');
+      } else {
+        logger.debug('[handleTranscript] Calling resetSilenceTimer()');
+        resetSilenceTimer();
+      }
+    } else {
+      logger.debug('[handleTranscript] Duplicate transcript (same as lastCommittedTranscript), skipping accumulation', {
+        transcript: transcript,
+        lastCommittedTranscript: lastCommittedTranscriptRef.current,
+      });
     }
   };
 
   // Handle silence detection from LiveScribeSilence
   const handleSilenceDetected = (partialText: string) => {
-    logger.debug('Fast silence detected', { hasText: !!partialText?.trim() });
-    
-    // 1. If we received text, trust it immediately
-    if (partialText && partialText.trim()) {
-        // Clear any existing silence timer to prevent duplicate sends
-        clearSilenceTimer();
-        
-        // Force the accumulator to this text
-        accumulatedTranscriptRef.current = partialText;
-        
-        // Mark this text as "processed" so we ignore the delayed server commit
-        processedSilenceTranscriptRef.current = partialText;
-        
-        // Trigger immediately
-        handleSilence();
+    // Basic validation
+    if (!partialText || !partialText.trim()) return;
+
+    // 1. Check Lock
+    if (isProcessingRef.current) {
+      logger.debug('[handleSilenceDetected] Ignored: Already processing');
+      return;
     }
+
+    const textToProcess = partialText.trim();
+
+    // 2. Check Deduplication
+    if (textToProcess === processedSilenceTranscriptRef.current) {
+      logger.debug('[handleSilenceDetected] Ignored: Already processed');
+      return;
+    }
+
+    logger.debug('[handleSilenceDetected] Triggering processing', { text: textToProcess });
+    
+    // 3. Prepare State
+    clearSilenceTimer();
+    accumulatedTranscriptRef.current = textToProcess;
+    
+    // 4. Execute
+    handleSilence();
   };
 
   // Handle LiveScribeSilence status change
