@@ -154,17 +154,19 @@ Event schemas:
 Transcript:
 {transcript}
 
-Return a JSON array of events. Each event must include:
-- "type": The event type name in lowercase (one of: {', '.join(registered_events.keys())}) - MUST be lowercase, e.g., "turn_advance", "spell_cast", "initiative_roll"
-- "character_id": <integer ID from the character list>
-- "character_name": "<exact name from character list>"
-- All other required fields for that event type
-- "transcript_segment": "<the exact text segment that describes this event>"
+Return a JSON array of events. Each event MUST include:
+- "type": The event type name in lowercase (one of: {', '.join(registered_events.keys())}) - REQUIRED field, MUST be lowercase, e.g., "damage", "healing", "turn_advance", "spell_cast", "initiative_roll"
+- "character_id": <integer ID from the character list> - REQUIRED field
+- "character_name": "<exact name from character list>" - REQUIRED field
+- All other required fields for that event type (see schemas above)
+- "transcript_segment": "<the exact text segment that describes this event>" - REQUIRED field
+
+CRITICAL: Every event object MUST have a "type" field. Do not include events without a "type" field.
 
 Only include events where you can clearly identify:
 - A character name that matches one from the list
-- A valid event type from the registered types
-- All required fields for that event type
+- A valid event type from the registered types: {', '.join(registered_events.keys())}
+- All required fields for that event type (including "type", "character_id", "character_name")
 
 If no events are found, return an empty array: []
 
@@ -222,6 +224,8 @@ Return ONLY valid JSON, no additional text or explanation."""
             event_type_name = event.get('type')
             if not event_type_name:
                 logger.warning(f"Event {i+1}: Missing 'type' field, skipping")
+                logger.debug(f"Event {i+1} fields: {list(event.keys())}")
+                logger.debug(f"Event {i+1} content: {event}")
                 continue
             
             # Get the event type handler
