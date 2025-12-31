@@ -4,7 +4,7 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 
 # Accept build argument for API URL (defaults to localhost for development)
-ARG VITE_API_URL=https://eoasserverdev-529682581088.europe-west1.run.app
+ARG VITE_API_URL=https://eoas-529682581088.europe-west1.run.app
 ENV VITE_API_URL=$VITE_API_URL
 
 # Copy package files
