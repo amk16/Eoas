@@ -266,7 +266,7 @@ async def create_character(character: CharacterCreate, user_id: str = Depends(au
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating character: {e}')
+        logger.error(f'Error creating character: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -378,7 +378,7 @@ async def update_character(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error updating character: {e}')
+        logger.error(f'Error updating character: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -461,7 +461,7 @@ async def generate_character_art(
             
             return result
         except Exception as e:
-            print(f'Error generating character art: {e}')
+            logger.error(f'Error generating character art: {e}')
             raise HTTPException(
                 status_code=500,
                 detail=f'Failed to generate character art: {str(e)}'
@@ -469,6 +469,6 @@ async def generate_character_art(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error in generate_character_art endpoint: {e}')
+        logger.error(f'Error in generate_character_art endpoint: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 

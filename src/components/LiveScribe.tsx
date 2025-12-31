@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { logger } from '../lib/logger';
 
 /**
  * LiveScribe Component
@@ -9,9 +10,6 @@ import { useState, useEffect, useRef, useCallback } from 'react';
  * - Fetches secure single-use token from backend (/api/scribe-token)
  * - Uses WebSocket to stream audio to ElevenLabs
  * - Displays partial and committed transcripts in real-time
- * 
- * Note: @elevenlabs/react SDK integration can be added for enhanced features.
- * Current implementation uses direct WebSocket connection for reliability.
  */
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
@@ -46,19 +44,6 @@ export default function LiveScribe({
   const [error, setError] = useState<string>('');
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
 
-  // Logging helper
-  const log = (message: string, data?: any) => {
-    console.log(`[LiveScribe] ${message}`, data || '');
-  };
-
-  const logError = (message: string, error: any) => {
-    console.error(`[LiveScribe] ERROR: ${message}`, error);
-  };
-
-  const logState = (newStatus: typeof status) => {
-    log(`Status changed: ${status} -> ${newStatus}`);
-  };
-
   // Refs for WebSocket fallback
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -75,8 +60,6 @@ export default function LiveScribe({
 
   // Cleanup function
   const cleanup = useCallback(() => {
-    log('Starting cleanup...');
-    
     // Reset session ready flag
     sessionReadyRef.current = false;
     wsOpenTimeRef.current = null;
@@ -84,10 +67,9 @@ export default function LiveScribe({
     // Cleanup WebSocket
     if (wsRef.current) {
       try {
-        log(`Closing WebSocket (state: ${wsRef.current.readyState})`);
         wsRef.current.close();
       } catch (e) {
-        logError('Error closing WebSocket', e);
+        logger.error('Error closing WebSocket', e);
       }
       wsRef.current = null;
     }
@@ -95,11 +77,10 @@ export default function LiveScribe({
     // Cleanup audio worklet
     if (workletNodeRef.current) {
       try {
-        log('Disconnecting AudioWorkletNode');
         workletNodeRef.current.disconnect();
         workletNodeRef.current.port.close();
       } catch (e) {
-        logError('Error disconnecting AudioWorkletNode', e);
+        logger.error('Error disconnecting AudioWorkletNode', e);
       }
       workletNodeRef.current = null;
     }
@@ -107,43 +88,36 @@ export default function LiveScribe({
     // Cleanup fallback processor (ScriptProcessorNode)
     if (processorRef.current) {
       try {
-        log('Disconnecting ScriptProcessorNode (fallback)');
         processorRef.current.disconnect();
       } catch (e) {
-        logError('Error disconnecting ScriptProcessorNode', e);
+        logger.error('Error disconnecting ScriptProcessorNode', e);
       }
       processorRef.current = null;
     }
 
     if (audioContextRef.current) {
       try {
-        log(`Closing AudioContext (state: ${audioContextRef.current.state})`);
         audioContextRef.current.close();
       } catch (e) {
-        logError('Error closing AudioContext', e);
+        logger.error('Error closing AudioContext', e);
       }
       audioContextRef.current = null;
     }
 
     if (streamRef.current) {
-      log(`Stopping ${streamRef.current.getTracks().length} media stream tracks`);
       streamRef.current.getTracks().forEach(track => {
-        log(`Stopping track: ${track.kind} (id: ${track.id}, enabled: ${track.enabled})`);
         track.stop();
       });
       streamRef.current = null;
     }
 
     tokenRef.current = null;
-    log('Cleanup completed');
   }, []);
 
   // Check microphone permission on mount
   useEffect(() => {
-    log('Component mounted, checking microphone permission');
     checkMicrophonePermission();
     return () => {
-      log('Component unmounting, running cleanup');
       cleanup();
     };
   }, [cleanup]);
@@ -173,17 +147,13 @@ export default function LiveScribe({
   }, [autoStart, hasPermission, status]);
 
   const checkMicrophonePermission = async () => {
-    log('Checking microphone permission...');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      log('Microphone permission granted', {
-        tracks: stream.getTracks().map(t => ({ id: t.id, kind: t.kind, enabled: t.enabled }))
-      });
       stream.getTracks().forEach(track => track.stop());
       setHasPermission(true);
       setError('');
     } catch (err: any) {
-      logError('Microphone permission check failed', {
+      logger.error('Microphone permission check failed', {
         name: err.name,
         message: err.message,
         constraint: err.constraint
@@ -200,21 +170,12 @@ export default function LiveScribe({
   };
 
   const fetchToken = async (): Promise<string> => {
-    log(`Fetching token from ${API_URL}/api/scribe-token`);
     try {
-      const startTime = Date.now();
       const response = await fetch(`${API_URL}/api/scribe-token`);
-      const fetchTime = Date.now() - startTime;
-      
-      log(`Token fetch response received (${fetchTime}ms)`, {
-        status: response.status,
-        statusText: response.statusText,
-        ok: response.ok
-      });
 
       if (!response.ok) {
         const errorText = await response.text();
-        logError('Token fetch failed', {
+        logger.error('Token fetch failed', {
           status: response.status,
           statusText: response.statusText,
           errorText: errorText.substring(0, 200) // Limit error text length
@@ -225,33 +186,21 @@ export default function LiveScribe({
         throw new Error(`Failed to get token: ${errorText || response.statusText}`);
       }
       const data = await response.json();
-      log('Token response received', {
-        hasToken: !!data.token,
-        hasSignedUrl: !!data.signed_url,
-        hasAccessToken: !!data.access_token,
-        keys: Object.keys(data)
-      });
       
       // Handle different token response formats
       const token = data.token || data.signed_url || data.access_token || JSON.stringify(data);
-      const tokenPreview = typeof token === 'string' && token.length > 50 
-        ? `${token.substring(0, 50)}...` 
-        : token;
-      log(`Token extracted (length: ${typeof token === 'string' ? token.length : 'N/A'}, preview: ${tokenPreview})`);
       return token;
     } catch (err: any) {
-      logError('Token fetch exception', err);
+      logger.error('Token fetch exception', err);
       throw new Error(`Token fetch failed: ${err.message}`);
     }
   };
 
   // WebSocket fallback implementation
   const startWebSocketStream = async (token: string) => {
-    log('Starting WebSocket stream with AudioWorklet');
     sessionReadyRef.current = false; // Reset session ready flag
     try {
       // Get microphone stream
-      log('Requesting microphone access...');
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
@@ -260,69 +209,40 @@ export default function LiveScribe({
           sampleRate: 16000,
         },
       });
-      log('Microphone stream obtained', {
-        tracks: stream.getTracks().map(t => ({
-          id: t.id,
-          kind: t.kind,
-          enabled: t.enabled,
-          muted: t.muted,
-          readyState: t.readyState
-        }))
-      });
       streamRef.current = stream;
 
       // Create audio context
-      log('Creating AudioContext (sampleRate: 16000)');
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)({
         sampleRate: 16000,
       });
-      log(`AudioContext created (state: ${audioContext.state}, sampleRate: ${audioContext.sampleRate})`);
       audioContextRef.current = audioContext;
 
       // Load AudioWorklet processor
-      log('Loading AudioWorklet processor...');
       try {
         const workletUrl = new URL('../audio-processor.worklet.js', import.meta.url);
-        log(`Attempting to load worklet from: ${workletUrl.href}`);
         await audioContext.audioWorklet.addModule(workletUrl);
-        log('AudioWorklet module loaded successfully');
       } catch (error) {
-        logError('Failed to load worklet from module URL, trying public directory', error);
+        logger.debug('Failed to load worklet from module URL, trying public directory', error);
         // Fallback: try loading from public directory if module import fails
         try {
-          log('Attempting to load worklet from /audio-processor.worklet.js');
           await audioContext.audioWorklet.addModule('/audio-processor.worklet.js');
-          log('AudioWorklet module loaded from public directory');
         } catch (fallbackError) {
-          logError('AudioWorklet not supported, falling back to ScriptProcessorNode', fallbackError);
+          logger.debug('AudioWorklet not supported, falling back to ScriptProcessorNode', fallbackError);
           // Fallback to ScriptProcessorNode if AudioWorklet fails
           return startWebSocketStreamFallback(token, stream, audioContext);
         }
       }
 
       // Create audio source from microphone
-      log('Creating MediaStreamSource');
       const source = audioContext.createMediaStreamSource(stream);
       
       // Create AudioWorkletNode (modern, non-deprecated approach)
-      log('Creating AudioWorkletNode');
       const workletNode = new AudioWorkletNode(audioContext, 'audio-processor');
       workletNodeRef.current = workletNode;
-      log('AudioWorkletNode created', {
-        numberOfInputs: workletNode.numberOfInputs,
-        numberOfOutputs: workletNode.numberOfOutputs,
-        channelCount: workletNode.channelCount
-      });
 
       // Set up message handler to receive processed audio data
-      let audioChunkCount = 0;
       workletNode.port.onmessage = (event) => {
         if (event.data.type === 'audioData' && wsRef.current?.readyState === WebSocket.OPEN && sessionReadyRef.current) {
-          audioChunkCount++;
-          if (audioChunkCount % 100 === 0) {
-            log(`Sent ${audioChunkCount} audio chunks to WebSocket`);
-          }
-          
           // Convert ArrayBuffer to base64
           const int16Array = new Int16Array(event.data.data);
           const uint8Array = new Uint8Array(int16Array.buffer);
@@ -341,80 +261,44 @@ export default function LiveScribe({
             sample_rate: 16000
           };
           wsRef.current.send(JSON.stringify(message));
-        } else if (event.data.type === 'audioData') {
-          if (!sessionReadyRef.current) {
-            // Silently drop audio until session is ready
-            if (audioChunkCount === 0) {
-              log('Audio data received but session not ready yet');
-            }
-          } else {
-            log(`Audio data received but WebSocket not ready (state: ${wsRef.current?.readyState})`);
-          }
         }
       };
 
       // Build WebSocket URL for ElevenLabs Realtime API
-      // Note: Adjust the URL format based on actual ElevenLabs API documentation
-      // The token format may vary - it could be a signed URL or a token string
-      // Common formats:
-      // - wss://api.elevenlabs.io/v1/speech-to-text/realtime?token=...
-      // - wss://api.elevenlabs.io/v1/realtime/... (check ElevenLabs docs)
-      // If token is a signed URL, use it directly; otherwise construct the URL
       const wsUrl = typeof token === 'string' && token.startsWith('wss://')
         ? token  // Token is already a signed URL
         : `wss://api.elevenlabs.io/v1/speech-to-text/realtime?token=${encodeURIComponent(token)}&model_id=scribe_v2_realtime&audio_format=pcm_16000`;
-      
-      log('Connecting to WebSocket', {
-        url: wsUrl.substring(0, 100) + '...', // Don't log full URL with token
-        isSignedUrl: typeof token === 'string' && token.startsWith('wss://')
-      });
 
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       // Connect audio nodes (after WebSocket is created so worklet can send data)
-      log('Connecting audio nodes');
       source.connect(workletNode);
 
       ws.onopen = () => {
         wsOpenTimeRef.current = Date.now();
-        log('WebSocket opened successfully');
+        logger.info('WebSocket connection opened');
         setStatus('connected');
         setError('');
-        // Note: ElevenLabs Realtime API should automatically send session_started message
-        // No configuration message needed - the connection URL includes model_id and audio_format
       };
 
-      let messageCount = 0;
       ws.onmessage = (event) => {
-        messageCount++;
         try {
           const data = JSON.parse(event.data);
           const messageType = data.message_type || data.type;
-          
-          if (messageCount === 1) {
-            log('First WebSocket message received', data);
-          }
-          
-          if (messageCount % 10 === 0) {
-            log(`Received ${messageCount} WebSocket messages`);
-          }
 
           if (messageType === 'session_started') {
-            log('Session started - ready to receive audio', {
-              session_id: data.session_id,
-              config: data.config
+            logger.info('Session started - ready to receive audio', {
+              session_id: data.session_id
             });
             sessionReadyRef.current = true; // Mark session as ready to receive audio
           } else if (messageType === 'partial_transcript' || messageType === 'partial_transcript_with_timestamps') {
-            log(`Partial transcript received: "${data.text || data.transcript}"`);
             setTranscripts(prev => {
               // Update or add partial transcript
               const filtered = prev.filter(t => t.isPartial);
               return [...filtered, { text: data.text || data.transcript || '', isPartial: true, timestamp: Date.now() }];
             });
           } else if (messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps') {
-            log(`Committed transcript received: "${data.text || data.transcript}"`);
             const transcriptText = data.text || data.transcript || '';
             setTranscripts(prev => {
               // Remove partials and add committed
@@ -426,13 +310,11 @@ export default function LiveScribe({
               onTranscript(transcriptText);
             }
           } else if (messageType === 'error' || messageType?.endsWith('Error')) {
-            logError('WebSocket error message received', data);
+            logger.error('WebSocket error message received', data);
             throw new Error(data.message || data.error || 'WebSocket error');
-          } else {
-            log(`Unknown message type: ${messageType}`, data);
           }
         } catch (err: any) {
-          logError('Error parsing WebSocket message', {
+          logger.error('Error parsing WebSocket message', {
             error: err,
             rawData: typeof event.data === 'string' ? event.data.substring(0, 200) : 'binary data'
           });
@@ -440,7 +322,7 @@ export default function LiveScribe({
       };
 
       ws.onerror = (event) => {
-        logError('WebSocket error event', event);
+        logger.error('WebSocket error event', event);
         setError('Connection error. Token may have expired. Please try again.');
         setStatus('error');
         cleanup();
@@ -448,18 +330,12 @@ export default function LiveScribe({
 
       ws.onclose = (event) => {
         const timeSinceOpen = wsOpenTimeRef.current ? Date.now() - wsOpenTimeRef.current : null;
-        log('WebSocket closed', {
-          code: event.code,
-          reason: event.reason,
-          wasClean: event.wasClean,
-          timeSinceOpen: timeSinceOpen ? `${timeSinceOpen}ms` : 'unknown'
-        });
         
         // Only cleanup if not intentionally stopped (user will call cleanup)
         if (!isIntentionallyStoppedRef.current) {
           // If WebSocket closed very quickly after opening (less than 500ms), it's likely a connection issue
           if (timeSinceOpen !== null && timeSinceOpen < 500) {
-            logError('WebSocket closed immediately after opening (possible connection issue)', {
+            logger.error('WebSocket closed immediately after opening (possible connection issue)', {
               code: event.code,
               timeSinceOpen,
               wasClean: event.wasClean
@@ -477,33 +353,32 @@ export default function LiveScribe({
             // Not a normal closure - unexpected error
             if (event.code === 1008) {
               // Policy violation - likely expired token
-              logError('WebSocket closed: Policy violation (likely expired token)', event);
+              logger.error('WebSocket closed: Policy violation (likely expired token)', event);
               setError('Token expired. Please try again.');
             } else if (event.code === 1005) {
-              logError('WebSocket closed without status code', event);
+              logger.error('WebSocket closed without status code', event);
               setError('Connection lost unexpectedly. Please try again.');
             } else {
-              logError('WebSocket closed unexpectedly', event);
+              logger.error('WebSocket closed unexpectedly', event);
               setError(`Connection closed unexpectedly (code: ${event.code}). Please try again.`);
             }
             setStatus('error');
             cleanup();
           } else {
             // Normal closure but unexpected - might be server-side
-            log('WebSocket closed normally (unexpected)');
+            logger.warn('WebSocket closed normally (unexpected)');
             setError('Connection closed by server. Please try again.');
             setStatus('error');
             cleanup();
           }
         } else {
-          log('WebSocket closed (intentional stop)');
           setStatus('idle');
         }
         wsOpenTimeRef.current = null;
       };
 
     } catch (err: any) {
-      console.error('WebSocket stream error:', err);
+      logger.error('WebSocket stream error', err);
       setError(err.message || 'Failed to start audio stream');
       setStatus('error');
       cleanup();
@@ -516,18 +391,16 @@ export default function LiveScribe({
     stream: MediaStream,
     audioContext: AudioContext
   ) => {
-    log('Using ScriptProcessorNode fallback (AudioWorklet not available)');
+    logger.debug('Using ScriptProcessorNode fallback (AudioWorklet not available)');
     try {
       // Create audio source from microphone
       const source = audioContext.createMediaStreamSource(stream);
       
       // Fallback: Use ScriptProcessorNode (deprecated but works everywhere)
-      log('Creating ScriptProcessorNode (bufferSize: 4096)');
       const processor = audioContext.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor as any;
 
       // Connect audio nodes
-      log('Connecting audio nodes (fallback)');
       source.connect(processor);
       processor.connect(audioContext.destination);
 
@@ -536,47 +409,32 @@ export default function LiveScribe({
         ? token
         : `wss://api.elevenlabs.io/v1/speech-to-text/realtime?token=${encodeURIComponent(token)}&model_id=scribe_v2_realtime&audio_format=pcm_16000`;
 
-      log('Connecting to WebSocket (fallback)', {
-        url: wsUrl.substring(0, 100) + '...'
-      });
-
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
         wsOpenTimeRef.current = Date.now();
-        log('WebSocket opened successfully (fallback)');
+        logger.info('WebSocket opened successfully (fallback)');
         setStatus('connected');
         setError('');
-        // Note: ElevenLabs Realtime API should automatically send session_started message
-        // No configuration message needed - the connection URL includes model_id and audio_format
       };
 
-      let messageCount = 0;
       ws.onmessage = (event) => {
-        messageCount++;
         try {
           const data = JSON.parse(event.data);
           const messageType = data.message_type || data.type;
 
-          if (messageCount === 1) {
-            log('First WebSocket message received (fallback)', data);
-          }
-
           if (messageType === 'session_started') {
-            log('Session started - ready to receive audio (fallback)', {
-              session_id: data.session_id,
-              config: data.config
+            logger.info('Session started - ready to receive audio (fallback)', {
+              session_id: data.session_id
             });
             sessionReadyRef.current = true; // Mark session as ready to receive audio
           } else if (messageType === 'partial_transcript' || messageType === 'partial_transcript_with_timestamps') {
-            log(`Partial transcript received (fallback): "${data.text || data.transcript}"`);
             setTranscripts(prev => {
               const filtered = prev.filter(t => t.isPartial);
               return [...filtered, { text: data.text || data.transcript || '', isPartial: true, timestamp: Date.now() }];
             });
           } else if (messageType === 'committed_transcript' || messageType === 'committed_transcript_with_timestamps') {
-            log(`Committed transcript received (fallback): "${data.text || data.transcript}"`);
             const transcriptText = data.text || data.transcript || '';
             setTranscripts(prev => {
               const filtered = prev.filter(t => !t.isPartial);
@@ -587,18 +445,16 @@ export default function LiveScribe({
               onTranscript(transcriptText);
             }
           } else if (messageType === 'error' || messageType?.endsWith('Error')) {
-            logError('WebSocket error message received (fallback)', data);
+            logger.error('WebSocket error message received (fallback)', data);
             throw new Error(data.message || data.error || 'WebSocket error');
-          } else {
-            log(`Unknown message type (fallback): ${messageType}`, data);
           }
         } catch (err: any) {
-          logError('Error parsing WebSocket message (fallback)', err);
+          logger.error('Error parsing WebSocket message (fallback)', err);
         }
       };
 
       ws.onerror = (event) => {
-        logError('WebSocket error event (fallback)', event);
+        logger.error('WebSocket error event (fallback)', event);
         setError('Connection error. Token may have expired. Please try again.');
         setStatus('error');
         cleanup();
@@ -606,18 +462,12 @@ export default function LiveScribe({
 
       ws.onclose = (event) => {
         const timeSinceOpen = wsOpenTimeRef.current ? Date.now() - wsOpenTimeRef.current : null;
-        log('WebSocket closed (fallback)', {
-          code: event.code,
-          reason: event.reason,
-          wasClean: event.wasClean,
-          timeSinceOpen: timeSinceOpen ? `${timeSinceOpen}ms` : 'unknown'
-        });
         
         // Only cleanup if not intentionally stopped (user will call cleanup)
         if (!isIntentionallyStoppedRef.current) {
           // If WebSocket closed very quickly after opening (less than 500ms), it's likely a connection issue
           if (timeSinceOpen !== null && timeSinceOpen < 500) {
-            logError('WebSocket closed immediately after opening (possible connection issue, fallback)', {
+            logger.error('WebSocket closed immediately after opening (possible connection issue, fallback)', {
               code: event.code,
               timeSinceOpen,
               wasClean: event.wasClean
@@ -634,39 +484,33 @@ export default function LiveScribe({
           } else if (event.code !== 1000) {
             // Not a normal closure - unexpected error
             if (event.code === 1008) {
-              logError('WebSocket closed: Policy violation (fallback)', event);
+              logger.error('WebSocket closed: Policy violation (fallback)', event);
               setError('Token expired. Please try again.');
             } else if (event.code === 1005) {
-              logError('WebSocket closed without status code (fallback)', event);
+              logger.error('WebSocket closed without status code (fallback)', event);
               setError('Connection lost unexpectedly. Please try again.');
             } else {
-              logError('WebSocket closed unexpectedly (fallback)', event);
+              logger.error('WebSocket closed unexpectedly (fallback)', event);
               setError(`Connection closed unexpectedly (code: ${event.code}). Please try again.`);
             }
             setStatus('error');
             cleanup();
           } else {
             // Normal closure but unexpected - might be server-side
-            log('WebSocket closed normally (unexpected, fallback)');
+            logger.warn('WebSocket closed normally (unexpected, fallback)');
             setError('Connection closed by server. Please try again.');
             setStatus('error');
             cleanup();
           }
         } else {
-          log('WebSocket closed (intentional stop, fallback)');
           setStatus('idle');
         }
         wsOpenTimeRef.current = null;
       };
 
       // Process audio chunks (deprecated ScriptProcessorNode approach)
-      let audioChunkCount = 0;
       processor.onaudioprocess = (e) => {
         if (ws.readyState === WebSocket.OPEN && sessionReadyRef.current) {
-          audioChunkCount++;
-          if (audioChunkCount % 100 === 0) {
-            log(`Processed ${audioChunkCount} audio chunks (fallback)`);
-          }
           const inputData = e.inputBuffer.getChannelData(0);
           // Convert Float32Array to Int16Array (s16le format)
           const int16Data = new Int16Array(inputData.length);
@@ -697,7 +541,7 @@ export default function LiveScribe({
       };
 
     } catch (err: any) {
-      logError('WebSocket stream error (fallback)', err);
+      logger.error('WebSocket stream error (fallback)', err);
       setError(err.message || 'Failed to start audio stream');
       setStatus('error');
       cleanup();
@@ -712,26 +556,22 @@ export default function LiveScribe({
   // scribe.on('committed_transcript', ...);
 
   const handleStart = async () => {
-    log('=== Starting transcription ===');
     isIntentionallyStoppedRef.current = false; // Reset intentional stop flag
     try {
       setError('');
-      logState(status);
       setStatus('getting-token');
 
       // Fetch token from server
       const token = await fetchToken();
       tokenRef.current = token;
 
-      logState('getting-token');
       setStatus('connecting');
 
       // Use WebSocket implementation
-      // Note: To use @elevenlabs/react SDK instead, integrate useScribe hook properly
       await startWebSocketStream(token);
-      log('=== Transcription started successfully ===');
+      logger.info('Transcription started successfully');
     } catch (err: any) {
-      logError('Start error', err);
+      logger.error('Start error', err);
       setError(err.message || 'Failed to start transcription');
       setStatus('error');
       cleanup();
@@ -739,11 +579,9 @@ export default function LiveScribe({
   };
 
   const handleStop = () => {
-    log('=== Stopping transcription ===');
     isIntentionallyStoppedRef.current = true; // Mark as intentional stop
     cleanup();
     setStatus('idle');
-    log('=== Transcription stopped ===');
   };
 
   // Controlled mode: start/stop based on `active` prop (used for subtle record buttons)
@@ -764,20 +602,17 @@ export default function LiveScribe({
   }, [active, hasPermission, status]);
 
   const handleClear = () => {
-    log(`Clearing ${transcripts.length} transcript segments`);
     setTranscripts([]);
   };
 
   const requestMicrophoneAccess = async () => {
-    log('User requested microphone access');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      log('Microphone access granted via user request');
       stream.getTracks().forEach(track => track.stop());
       setHasPermission(true);
       setError('');
     } catch (err: any) {
-      logError('Failed to access microphone via user request', err);
+      logger.error('Failed to access microphone via user request', err);
       setHasPermission(false);
       setError('Failed to access microphone: ' + err.message);
     }

@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import time
+import traceback
 from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -262,7 +263,6 @@ Return the corrected transcript exactly as it should be used for game event anal
         if hasattr(e, 'response'):
             logger.error(f"      Response status: {getattr(e.response, 'status_code', 'N/A')}")
         
-        import traceback
         logger.debug(f"      Full traceback:\n{traceback.format_exc()}")
         
         # If correction fails, return original transcript to avoid breaking the pipeline

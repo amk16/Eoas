@@ -122,11 +122,6 @@ const App = () => {
               </ProtectedRoute>
             }
           />
-          
-            
-          
-         
-         
           <Route
             path="/ioun-silence/:conversationId?"
             element={

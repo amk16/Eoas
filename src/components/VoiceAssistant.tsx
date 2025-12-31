@@ -9,6 +9,7 @@ import LiveScribeSilence from './LiveScribeSilence';
 import ConversationsDrawer from './conversations/ConversationsDrawer';
 import { createConversation, getConversation } from '../services/conversationService';
 import type { Conversation } from '../types';
+import { logger } from '../lib/logger';
 
 interface ChatMessage {
   id: string;
@@ -75,7 +76,7 @@ export default function VoiceAssistant() {
   useEffect(() => {
     // If URL has a conversation ID, load it instead of clearing
     if (urlConversationId) {
-      console.log('[VoiceAssistant] Initial mount with conversation ID in URL, loading conversation');
+      logger.debug('Initial mount with conversation ID in URL, loading conversation', { conversationId: urlConversationId });
       loadConversation(urlConversationId).finally(() => {
         setIsInitializing(false);
       });
@@ -107,7 +108,6 @@ export default function VoiceAssistant() {
     // This prevents any flash by ensuring we don't render messages during init
     setTimeout(() => {
       setIsInitializing(false);
-      console.log('[VoiceAssistant] Initial mount - state cleared, navigated to base URL');
     }, 50);
   }, []); // Empty dependency array - runs only on mount
   
@@ -142,16 +142,15 @@ export default function VoiceAssistant() {
     const createInitialConversation = async () => {
       try {
         setIsCreatingConversation(true);
-        console.log('[VoiceAssistant] Auto-creating initial conversation');
         const newConversation = await createConversation();
         setCurrentConversationId(newConversation.id);
         currentConversationIdRef.current = newConversation.id; // Update ref synchronously
         setCurrentConversation(newConversation);
         // Navigate to conversation URL
         navigate(`/ioun-silence/${newConversation.id}`, { replace: true });
-        console.log(`[VoiceAssistant] Auto-created conversation: ${newConversation.id}`);
+        logger.info('Auto-created initial conversation', { conversationId: newConversation.id });
       } catch (err: any) {
-        console.error('Error auto-creating conversation:', err);
+        logger.error('Error auto-creating conversation', err);
         setError(err.message || 'Failed to create conversation');
       } finally {
         setIsCreatingConversation(false);
@@ -187,9 +186,9 @@ export default function VoiceAssistant() {
         content: msg.content,
       }));
       
-      console.log(`[VoiceAssistant] Loaded conversation ${conversationId} with ${conversation.messages.length} messages`);
+      logger.info('Loaded conversation', { conversationId, messageCount: conversation.messages.length });
     } catch (err: any) {
-      console.error('Error loading conversation:', err);
+      logger.error('Error loading conversation', err);
       const errorMessage = err.message || 'Failed to load conversation';
       setError(errorMessage);
       // Navigate back to base route if conversation doesn't exist
@@ -223,9 +222,9 @@ export default function VoiceAssistant() {
       setCurrentConversation(newConversation);
       // Navigate to conversation URL instead of base URL
       navigate(`/ioun-silence/${newConversation.id}`);
-      console.log(`[VoiceAssistant] Created new conversation: ${newConversation.id}`);
+      logger.info('Created new conversation', { conversationId: newConversation.id });
     } catch (err: any) {
-      console.error('Error creating new conversation:', err);
+      logger.error('Error creating new conversation', err);
       const errorMessage = err.message || 'Failed to create new conversation';
       setError(errorMessage);
     }
@@ -245,11 +244,9 @@ export default function VoiceAssistant() {
     const currentTranscript = accumulatedTranscriptRef.current.trim();
     
     if (isScribeActive && !isProcessing && currentTranscript) {
-      console.log('[VoiceAssistant] Setting standard silence timer (3s fallback)');
       silenceTimerRef.current = setTimeout(() => {
         const transcriptAtExpiry = accumulatedTranscriptRef.current.trim();
         if (transcriptAtExpiry && !isProcessing) {
-          console.log('[VoiceAssistant] 3s Timer Expired -> Triggering');
           handleSilence();
         }
       }, 3000);
@@ -258,12 +255,10 @@ export default function VoiceAssistant() {
 
   // Handle silence - send accumulated transcript to backend
   const handleSilence = async () => {
-    console.log('[VoiceAssistant] ===== HANDLING SILENCE =====');
     const transcript = accumulatedTranscriptRef.current.trim();
     
     // Safety check: Don't process empty transcripts or if already processing
     if (!transcript || isProcessingRef.current) {
-      console.log('[VoiceAssistant] ✗ Skipping (Empty or Processing)');
       return;
     }
 
@@ -279,12 +274,12 @@ export default function VoiceAssistant() {
     
     
     try {
-      console.log('[VoiceAssistant] Sending to Backend:', transcript);
+      logger.debug('Processing silence - sending transcript to backend', { transcriptLength: transcript.length });
       
       // Require an existing conversation - use ref for synchronous access
       const conversationId = currentConversationIdRef.current;
       if (!conversationId) {
-        console.error('[VoiceAssistant] No conversation ID available. Please start a new conversation first.');
+        logger.error('No conversation ID available. Please start a new conversation first.');
         throw new Error('No active conversation. Please click "New Chat" to start a conversation.');
       }
       
@@ -334,11 +329,11 @@ export default function VoiceAssistant() {
       
       // Handle creation requests if detected
       if (response.creation_requests && response.creation_requests.length > 0) {
-        console.log(`[VoiceAssistant] Detected ${response.creation_requests.length} creation request(s)`);
+        logger.info('Detected creation requests', { count: response.creation_requests.length });
         setPendingCreationRequests(response.creation_requests);
       }
     } catch (err: any) {
-      console.error('[VoiceAssistant] Error:', err);
+      logger.error('Error processing silence', err);
       setError(err.message || 'Failed to process transcript');
     } finally {
       isProcessingRef.current = false;
@@ -356,11 +351,11 @@ export default function VoiceAssistant() {
     try {
       setIsExecutingCreations(true);
       setError('');
-      console.log(`[VoiceAssistant] Executing ${pendingCreationRequests.length} creation request(s)`);
+      logger.info('Executing creation requests', { count: pendingCreationRequests.length });
       
       const result = await executeCreations(pendingCreationRequests);
       
-      console.log(`[VoiceAssistant] Creation execution complete: ${result.success_count} success(es), ${result.error_count} error(s)`);
+      logger.info('Creation execution complete', { successCount: result.success_count, errorCount: result.error_count });
       
       // Show success/error messages
       if (result.success_count > 0) {
@@ -397,7 +392,7 @@ export default function VoiceAssistant() {
       // For now, just clear - user can refresh manually or we could trigger a reload
       
     } catch (err: any) {
-      console.error('[VoiceAssistant] Error executing creations:', err);
+      logger.error('Error executing creations', err);
       setError(err.message || 'Failed to execute creations');
     } finally {
       setIsExecutingCreations(false);
@@ -407,7 +402,6 @@ export default function VoiceAssistant() {
   // Cancel creation requests
   const handleCancelCreations = () => {
     setPendingCreationRequests([]);
-    console.log('[VoiceAssistant] Creation requests cancelled');
   };
 
   // Play TTS audio
@@ -428,9 +422,9 @@ export default function VoiceAssistant() {
         audioRef.current = null;
       };
       
-      audio.play().catch(console.error);
+      audio.play().catch((err) => logger.error('Error playing TTS audio', err));
     } catch (err) {
-      console.error(err);
+      logger.error('Error setting up TTS audio', err);
     }
   };
 
@@ -448,7 +442,6 @@ export default function VoiceAssistant() {
     if (!transcript || !transcript.trim()) return;
 
     if (processedSilenceTranscriptRef.current === transcript) {
-        console.log('[VoiceAssistant] ignoring server commit (already process via silence detection) Skipping.');
         return;
     }
     
@@ -464,8 +457,6 @@ export default function VoiceAssistant() {
         accumulatedTranscriptRef.current = transcript;
       }
       lastCommittedTranscriptRef.current = transcript;
-      
-      console.log(`[VoiceAssistant] Text Committed. Pending Silence? ${pendingSilenceTriggerRef.current}`);
 
       // Standard flow: User might still be talking, reset timer
       resetSilenceTimer();
@@ -474,12 +465,10 @@ export default function VoiceAssistant() {
 
   // Handle silence detection from LiveScribeSilence
   const handleSilenceDetected = (partialText: string) => {
-    console.log('[VoiceAssistant] 🚀 FAST SILENCE DETECTED');
+    logger.debug('Fast silence detected', { hasText: !!partialText?.trim() });
     
     // 1. If we received text, trust it immediately
     if (partialText && partialText.trim()) {
-        console.log('[VoiceAssistant] Trusting partial text:', partialText);
-        
         // Clear any existing silence timer to prevent duplicate sends
         clearSilenceTimer();
         
@@ -491,9 +480,6 @@ export default function VoiceAssistant() {
         
         // Trigger immediately
         handleSilence();
-    } else {
-        // Fallback if somehow text is empty (rare)
-        console.log('[VoiceAssistant] Silence detected but no text provided.');
     }
   };
 

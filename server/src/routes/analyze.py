@@ -336,9 +336,7 @@ async def analyze(
                 logger.info(f"   ✓ Saved event {i}: {event_desc}")
                 
             except Exception as e:
-                logger.error(f"   ❌ Failed to save event {i}: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
+                logger.exception(f"   ❌ Failed to save event {i}: {e}")
                 # Continue processing other events even if one fails
         
         logger.info(f"💾 Saved {len(saved_events)} event(s) to database")
@@ -362,10 +360,7 @@ async def analyze(
         logger.error(f"ValueError in analyze endpoint: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        logger.error(f"❌ Analysis error: {e}")
-        logger.error(f"Traceback: {error_trace}")
+        logger.exception(f"❌ Analysis error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f'Failed to analyze transcript: {str(e)}'

@@ -3,7 +3,6 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional, Union
 import logging
 from ..middleware.auth import authenticate_token
-from ..db.database import get_database
 from ..db.firebase import get_firestore
 from firebase_admin import firestore
 from ..services.event_types import get_event_type_by_name, get_registered_events
@@ -146,7 +145,7 @@ async def get_sessions(
         sessions.sort(key=lambda x: x.get('started_at', ''), reverse=True)
         return sessions
     except Exception as e:
-        print(f'Error fetching sessions: {e}')
+        logger.error(f'Error fetching sessions: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -263,7 +262,7 @@ async def get_session(session_id: str, user_id: str = Depends(authenticate_token
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching session: {e}')
+        logger.error(f'Error fetching session: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -326,7 +325,7 @@ async def create_session(session: SessionCreate, user_id: str = Depends(authenti
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating session: {e}')
+        logger.error(f'Error creating session: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -382,7 +381,7 @@ async def update_session(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error updating session: {e}')
+        logger.error(f'Error updating session: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -466,7 +465,7 @@ async def add_characters_to_session(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error adding characters to session: {e}')
+        logger.error(f'Error adding characters to session: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -500,7 +499,7 @@ async def get_session_events(session_id: int, user_id: str = Depends(authenticat
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching session events: {e}')
+        logger.error(f'Error fetching session events: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -559,7 +558,7 @@ async def create_damage_event(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating damage event: {e}')
+        logger.error(f'Error creating damage event: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -617,7 +616,7 @@ async def create_combat_event(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating combat event: {e}')
+        logger.error(f'Error creating combat event: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -706,9 +705,6 @@ async def create_event(
         if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
         
-        # Get database connection for SQLite (if needed)
-        db = get_database()
-        
         # Delegate to event type's handler (this does all the work)
         result = await event_type.handle_event(event_data, session_id, user_id, db_firestore, session_ref)
         
@@ -717,7 +713,7 @@ async def create_event(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating event: {e}')
+        logger.error(f'Error creating event: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -981,7 +977,7 @@ async def get_combat_state(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching combat state: {e}')
+        logger.error(f'Error fetching combat state: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1094,7 +1090,7 @@ async def advance_turn(
     except Exception as e:
         db = get_database()
         db.rollback()
-        print(f'Error advancing turn: {e}')
+        logger.error(f'Error advancing turn: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1117,52 +1113,6 @@ async def get_status_conditions(
         
         if not session_doc.exists:
             raise HTTPException(status_code=404, detail='Session not found')
-        
-        # Try SQLite path for legacy sessions (only if session_id can be converted to int)
-        try:
-            session_id_int = int(session_id)
-            db = get_database()
-            
-            # Verify session exists in SQLite
-            session = db.execute(
-                'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-                (session_id_int, user_id)
-            ).fetchone()
-            
-            if session:
-                # Get active status conditions with character names from SQLite
-                condition_rows = db.execute('''
-                    SELECT 
-                        asc.*,
-                        c.name as character_name
-                    FROM active_status_conditions asc
-                    JOIN characters c ON asc.character_id = c.id
-                    WHERE asc.session_id = ?
-                    ORDER BY asc.character_id, asc.condition_name
-                ''', (session_id_int,)).fetchall()
-                
-                conditions = []
-                for row in condition_rows:
-                    condition_dict = dict(row)
-                    # Check if condition has expired
-                    if condition_dict.get('expires_at'):
-                        import datetime
-                        expires_at = datetime.datetime.fromisoformat(condition_dict['expires_at'])
-                        if datetime.datetime.now() > expires_at:
-                            # Condition has expired, remove it
-                            db.execute(
-                                '''DELETE FROM active_status_conditions 
-                                   WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
-                                (session_id_int, condition_dict['character_id'], condition_dict['condition_name'])
-                            )
-                            continue
-                    conditions.append(condition_dict)
-                
-                db.commit()
-                return conditions
-        except (ValueError, TypeError):
-            # Session ID is a Firestore string - derive active conditions from events
-            pass
         
         # Firestore path: derive active status conditions from events
         events_ref = session_ref.collection('events')
@@ -1453,7 +1403,7 @@ async def get_buffs_debuffs(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching buffs/debuffs: {e}')
+        logger.error(f'Error fetching buffs/debuffs: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1740,7 +1690,7 @@ async def remove_buff_debuff(
     except Exception as e:
         db = get_database()
         db.rollback()
-        print(f'Error removing buff/debuff: {e}')
+        logger.error(f'Error removing buff/debuff: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1806,7 +1756,7 @@ async def get_spell_slots(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching spell slots: {e}')
+        logger.error(f'Error fetching spell slots: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -1991,7 +1941,7 @@ async def reset_character_spell_slots(
     except Exception as e:
         db = get_database()
         db.rollback()
-        print(f'Error resetting spell slots: {e}')
+        logger.error(f'Error resetting spell slots: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -2221,6 +2171,6 @@ async def clear_session_transcripts(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error clearing session transcripts: {e}')
+        logger.error(f'Error clearing session transcripts: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 

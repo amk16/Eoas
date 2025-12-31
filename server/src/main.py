@@ -16,9 +16,8 @@ server_dir = Path(__file__).parent.parent
 if str(server_dir) not in sys.path:
     sys.path.insert(0, str(server_dir))
 
-from src.db.database import init_database
 from src.db.firebase import init_firebase
-from src.routes import auth, characters, sessions, campaigns, audio, scribe_token, analyze, images, ioun, conversations
+from src.routes import auth, characters, sessions, campaigns, scribe_token, analyze, images, ioun, conversations
 
 # Load environment variables
 load_dotenv()
@@ -95,9 +94,6 @@ app.add_middleware(
 async def startup_event():
     logger.info("Starting D&D Tracker Server...")
     
-    # Initialize SQLite database (for campaigns, characters, sessions)
-    init_database()
-    
     # Initialize Firebase (for authentication and user data)
     try:
         init_firebase()
@@ -117,7 +113,6 @@ async def startup_event():
     uploads_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Character images directory: {uploads_dir}")
     
-    logger.info("Database initialized")
     logger.info("Server ready to accept requests")
 
 # Health check endpoint
@@ -130,7 +125,6 @@ app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(campaigns.router, prefix="/api/campaigns", tags=["campaigns"])
 app.include_router(characters.router, prefix="/api/characters", tags=["characters"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
-app.include_router(audio.router, prefix="/api/audio", tags=["audio"])
 app.include_router(analyze.router, prefix="/api", tags=["analyze"])
 app.include_router(scribe_token.router, tags=["scribe"])
 app.include_router(ioun.router, prefix="/api", tags=["ioun"])

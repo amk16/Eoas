@@ -7,6 +7,7 @@ import InitiativeTracker from './InitiativeTracker';
 import CharacterDetailSidebar from './CharacterDetailSidebar';
 import HealthEditModal from './HealthEditModal';
 import EventCreationModal from './EventCreationModal';
+import { logger } from '../../lib/logger';
 
 interface SessionCharacter {
   session_id: number;
@@ -134,7 +135,6 @@ export default function SessionView() {
       // Set up interval to analyze every 25 seconds
       analysisTimerRef.current = setInterval(() => {
         if (transcriptBufferRef.current.trim().length > 0) {
-          console.log('⏰ 25-second interval reached, analyzing buffered transcript');
           triggerAnalysis();
         }
       }, ANALYSIS_INTERVAL_MS);
@@ -159,7 +159,6 @@ export default function SessionView() {
   useEffect(() => {
     // When session ends, analyze any remaining buffer
     if (session && session.status === 'ended' && transcriptBufferRef.current.trim().length > 0) {
-      console.log('Session ended, analyzing remaining transcript in buffer');
       const remainingTranscript = transcriptBufferRef.current;
       transcriptBufferRef.current = '';
       
@@ -169,7 +168,7 @@ export default function SessionView() {
         : remainingTranscript;
       
       analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
-        console.error('Error analyzing remaining transcript on session end:', err);
+        logger.error('Error analyzing remaining transcript on session end', err);
       });
     }
     
@@ -183,7 +182,6 @@ export default function SessionView() {
 
       // Analyze remaining buffer if session is active
       if (transcriptBufferRef.current.trim().length > 0 && id && session?.status === 'active') {
-        console.log('Component unmounting, analyzing remaining transcript in buffer');
         const remainingTranscript = transcriptBufferRef.current;
         transcriptBufferRef.current = '';
         
@@ -193,7 +191,7 @@ export default function SessionView() {
           : remainingTranscript;
         
         analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
-          console.error('Error analyzing remaining transcript on unmount:', err);
+          logger.error('Error analyzing remaining transcript on unmount', err);
         });
       }
     };
@@ -216,7 +214,7 @@ export default function SessionView() {
         setError(err.response?.data?.error || 'Failed to load session');
       } else {
         setRefreshError(err.response?.data?.error || 'Failed to refresh session');
-        console.error('Failed to refresh session', err);
+        logger.error('Failed to refresh session', err);
       }
     } finally {
       if (mode === 'initial') {
@@ -235,7 +233,7 @@ export default function SessionView() {
       setTranscriptSegments(response.data || []);
     } catch (err) {
       // Don't block the whole screen if transcripts fail to load
-      console.error('Failed to load transcripts', err);
+      logger.error('Failed to load transcripts', err);
     }
   };
 
@@ -284,7 +282,7 @@ export default function SessionView() {
           return next;
         });
       } catch (err) {
-        console.error('Failed to persist transcript segment', err);
+        logger.error('Failed to persist transcript segment', err);
       }
     });
   };
@@ -294,7 +292,7 @@ export default function SessionView() {
     try {
       await api.delete(`/sessions/${id}/transcripts`);
     } catch (err) {
-      console.error('Failed to clear transcripts', err);
+      logger.error('Failed to clear transcripts', err);
     } finally {
       setTranscriptSegments([]);
     }
@@ -308,7 +306,7 @@ export default function SessionView() {
       const updated = res.data;
       setTranscriptSegments((prev) => prev.map((s) => (s.id === segmentId ? updated : s)));
     } catch (err) {
-      console.error('Failed to update transcript segment', err);
+      logger.error('Failed to update transcript segment', err);
     }
   };
 
@@ -335,7 +333,7 @@ export default function SessionView() {
       // Close confirmation dialog if open
       setEventToDelete(null);
     } catch (err: any) {
-      console.error('Failed to delete event:', err);
+      logger.error('Failed to delete event', err);
       alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to delete event');
     } finally {
       setDeletingEventId(null);
@@ -457,12 +455,13 @@ export default function SessionView() {
     lastAnalysisTimeRef.current = now;
     setLastAnalysisTime(now);
     
-    console.log(`📊 Analyzing transcript (time-based, ${transcriptToAnalyze.length} chars)`);
-    console.log(`📄 Full context: "${transcriptToAnalyze}"`);
+    logger.debug('Triggering time-based transcript analysis', { 
+      transcriptLength: transcriptToAnalyze.length 
+    });
     
     // Trigger analysis (don't await to avoid blocking, but handle errors)
     analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
-      console.error('Error in buffered transcript analysis:', err);
+      logger.error('Error in buffered transcript analysis', err);
     });
   };
 
@@ -474,43 +473,34 @@ export default function SessionView() {
 
     // Only analyze if transcript has meaningful content
     if (transcriptToAnalyze.trim().length < 10) {
-      console.log('Transcript too short, skipping analysis');
       return;
     }
 
     try {
       setAnalyzing(true);
-      console.log(`🔍 Analyzing transcript:`, transcriptToAnalyze);
+      logger.debug('Analyzing transcript', { transcriptLength: transcriptToAnalyze.length });
       
       const result = await analyzeTranscript(transcriptToAnalyze, id);
-      
-      console.log('✅ Analysis complete:', result);
 
       // Phase 4: Store previous_chunk_for_next_analysis if returned from backend
       // Check if property exists (even if empty string) to distinguish from undefined
       if (result.previous_chunk_for_next_analysis !== undefined) {
         previousChunkRef.current = result.previous_chunk_for_next_analysis;
-        if (result.previous_chunk_for_next_analysis) {
-          console.log(`📦 Stored previous_chunk_for_next_analysis (${result.previous_chunk_for_next_analysis.length} chars)`);
-        } else {
-          console.log(`📦 Stored empty previous_chunk_for_next_analysis (last event was at end of transcript)`);
-        }
       } else {
         // No previous chunk from backend - clear it
         previousChunkRef.current = '';
-        console.log(`📦 Cleared previous chunk (no data from backend)`);
       }
 
       // Phase 8: Save detected events to the database
       // Events are now saved directly by the backend in the /analyze endpoint
       // Just refresh the session data to show updated state
       if (result.events.length > 0) {
-        console.log(`✅ Backend saved ${result.events.length} event(s) directly`);
+        logger.info('Analysis complete - events detected', { eventCount: result.events.length });
         // Refresh session data to show updated HP, events, and other state
         await fetchSession({ mode: 'refresh' });
       }
     } catch (err: any) {
-      console.error('❌ Error analyzing transcript:', err);
+      logger.error('Error analyzing transcript', err);
       // Don't show error to user for every failed analysis, just log it
       // Analysis failures shouldn't break the transcription flow
     } finally {
@@ -538,7 +528,6 @@ export default function SessionView() {
 
     const currentBufferLength = transcriptBufferRef.current.trim().length;
     setBufferLength(currentBufferLength);
-    console.log(`📝 Transcript buffer: ${currentBufferLength} characters (analysis every ${ANALYSIS_INTERVAL_MS / 1000} seconds)`);
 
     // Persist committed segments to backend (maintained transcription)
     if (transcript && transcript.trim()) {
@@ -592,59 +581,66 @@ export default function SessionView() {
                 </span>
               ) : null}
               {session.status === 'active' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRecorderMounted(true);
-                    setRecording((v) => !v);
-                  }}
-                  className={[
-                    'shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-xl transition-colors text-sm font-medium border',
-                    recording
-                      ? 'bg-red-500/15 text-red-200 border-red-500/30 hover:bg-red-500/20'
-                      : 'bg-white/5 text-white border-white/10 hover:bg-white/10',
-                  ].join(' ')}
-                  title={recording ? 'Stop recording' : 'Start recording'}
-                >
-                  <span
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRecorderMounted(true);
+                      setRecording((v) => !v);
+                    }}
                     className={[
-                      'inline-block h-2 w-2 rounded-full',
-                      recording ? 'bg-red-400 animate-pulse' : 'bg-white/30',
+                      'shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-xl transition-colors text-sm font-medium border',
+                      recording
+                        ? 'bg-red-500/15 text-red-200 border-red-500/30 hover:bg-red-500/20'
+                        : 'bg-white/5 text-white border-white/10 hover:bg-white/10',
                     ].join(' ')}
-                    aria-hidden="true"
-                  />
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                      d="M12 14a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+                    title={recording ? 'Stop recording' : 'Start recording'}
+                  >
+                    <span
+                      className={[
+                        'inline-block h-2 w-2 rounded-full',
+                        recording ? 'bg-red-400 animate-pulse' : 'bg-white/30',
+                      ].join(' ')}
+                      aria-hidden="true"
                     />
-                    <path
-                      d="M19 11a7 7 0 0 1-14 0"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M12 18v3"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M8 21h8"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  <span className="hidden sm:inline">{recording ? 'Recording' : 'Record'}</span>
-                </button>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 14a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M19 11a7 7 0 0 1-14 0"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M12 18v3"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M8 21h8"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="hidden sm:inline">{recording ? 'Recording' : 'Record'}</span>
+                  </button>
+                  {!recording && (
+                    <span className="text-sm text-neutral-400">
+                      Press record to begin the session
+                    </span>
+                  )}
+                </>
               )}
             </div>
             <p className="text-neutral-300 mt-2">
