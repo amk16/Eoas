@@ -226,10 +226,10 @@ def update_conversation_mode_state(
     Args:
         user_id: User ID
         conversation_id: Conversation ID
-        mode: Current MODE (None to clear)
+        mode: Current MODE ("" to clear, None to keep unchanged)
         pending_events: List of pending event types (None to keep unchanged)
         current_event_data: Current event data (None to keep unchanged)
-        intent_detection_message: Message that triggered MODE entry (None to keep unchanged)
+        intent_detection_message: Message that triggered MODE entry ("" to clear, None to keep unchanged)
     """
     if not conversation_id:
         logger.warning(f"No conversation_id provided, cannot update MODE state")
@@ -254,7 +254,10 @@ def update_conversation_mode_state(
             'updated_at': firestore.SERVER_TIMESTAMP,
         }
         
-        if mode is not None:
+        # Use empty string as sentinel to clear, None to keep unchanged
+        if mode == "":
+            update_data['mode'] = None  # Clear it
+        elif mode is not None:
             update_data['mode'] = mode
         if pending_events is not None:
             update_data['pending_events'] = pending_events
