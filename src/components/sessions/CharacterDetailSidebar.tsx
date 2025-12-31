@@ -3,7 +3,7 @@ import api from '../../services/api';
 
 interface StatusCondition {
   session_id: number;
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   condition_name: string;
   applied_at: string;
@@ -13,7 +13,7 @@ interface StatusCondition {
 
 interface BuffDebuff {
   session_id: number;
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   effect_name: string;
   effect_type: 'buff' | 'debuff';
@@ -26,14 +26,14 @@ interface BuffDebuff {
 }
 
 interface SpellSlotUsage {
-  character_id: number;
+  character_id: string | number;
   character_name: string;
   slots_by_level: Record<string, number>; // e.g., {"1": 3, "2": 1, "3": 0}
 }
 
 interface CharacterDetailSidebarProps {
   sessionId: number;
-  characterId: number | null;
+  characterId: string | null;
   characterName: string | null;
   isOpen: boolean;
   onClose: () => void;
@@ -56,16 +56,10 @@ export default function CharacterDetailSidebar({
 
   useEffect(() => {
     if (isOpen && characterId) {
+      // Only fetch when sidebar opens/character is selected, not on constant polling
       fetchConditions();
       fetchBuffsDebuffs();
       fetchSpellSlots();
-      // Poll for updates every 3 seconds when open
-      const interval = setInterval(() => {
-        fetchConditions();
-        fetchBuffsDebuffs();
-        fetchSpellSlots();
-      }, 3000);
-      return () => clearInterval(interval);
     } else {
       setConditions([]);
       setBuffsDebuffs([]);
@@ -82,7 +76,7 @@ export default function CharacterDetailSidebar({
       const response = await api.get(`/sessions/${sessionId}/status-conditions`);
       // Filter conditions for this character
       const characterConditions = response.data.filter(
-        (c: StatusCondition) => c.character_id === characterId
+        (c: StatusCondition) => String(c.character_id) === characterId
       );
       setConditions(characterConditions);
     } catch (err: any) {

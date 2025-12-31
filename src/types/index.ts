@@ -4,18 +4,20 @@ export type User = {
 };
 
 export type Campaign = {
-  id: number;
-  user_id: number;
+  id: string;
+  user_id: string;
   name: string;
   description: string | null;
+  display_art_url: string | null;
+  art_prompt: string | null;
   created_at: string;
   updated_at: string;
 };
 
 export type Character = {
-  id: number;
-  user_id: number;
-  campaign_id: number | null;
+  id: string;
+  user_id: string;
+  campaign_id: string | null;
   name: string;
   max_hp: number;
   race: string | null;
@@ -29,14 +31,31 @@ export type Character = {
   notes: string | null;
   display_art_url: string | null;
   art_prompt: string | null;
+  // Stats (optional)
+  strength_base: number | null;
+  strength_bonus: number | null;
+  dexterity_base: number | null;
+  dexterity_bonus: number | null;
+  wisdom_base: number | null;
+  wisdom_bonus: number | null;
+  intelligence_base: number | null;
+  intelligence_bonus: number | null;
+  constitution_base: number | null;
+  constitution_bonus: number | null;
+  charisma_base: number | null;
+  charisma_bonus: number | null;
+  // Flavour (optional)
+  style: string | null;
+  clothing: string | null;
+  expression: string | null;
   created_at: string;
   updated_at: string;
 };
 
 export type Session = {
-  id: number;
-  user_id: number;
-  campaign_id: number | null;
+  id: string;
+  user_id: string;
+  campaign_id: string | null;
   name: string;
   started_at: string;
   ended_at: string | null;
@@ -58,5 +77,22 @@ export type DamageEvent = {
   type: 'damage' | 'healing';
   timestamp: string;
   transcript_segment: string | null;
+};
+
+export type Conversation = {
+  id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  last_message_at: string;
+};
+
+export type ConversationMessage = {
+  id: string;
+  conversation_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
 };
 

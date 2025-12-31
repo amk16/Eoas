@@ -31,22 +31,16 @@ export default function Home() {
     {
       color: theme.colors.background.secondary,
       title: 'Sessions',
-      description: 'Create and manage your D&D game sessions, track damage in real-time',
+      description: 'Create and manage your D&D game sessions, track combat events in real-time',
       label: 'Adventures',
       onClick: () => navigate('/sessions')
     },
     {
       color: theme.colors.background.quaternary,
-      title: 'Live Scribe',
-      description: 'Real-time transcription and automatic damage tracking from your voice',
+      title: 'Ioun',
+      description: 'Have the knowning mistress guide your journey',
       label: 'Voice AI',
-      onClick: () => navigate('/scribe')
-    },
-    {
-      color: theme.colors.background.tertiary,
-      title: 'D&D Damage Tracker',
-      description: `Welcome back, ${user?.email || 'Adventurer'}! Your campaign management hub`,
-      label: 'Dashboard'
+      onClick: () => navigate('/ioun-silence')
     }
   ];
 
@@ -62,7 +56,7 @@ export default function Home() {
               className="text-4xl font-bold mb-2"
               style={{ color: theme.colors.foreground.primary }}
             >
-              D&D Damage Tracker
+              PickAxe
             </h1>
             <p style={{ color: theme.colors.foreground.muted }}>
               Welcome, {user?.email}!

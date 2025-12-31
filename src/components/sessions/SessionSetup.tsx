@@ -7,10 +7,10 @@ import type { Character, Campaign } from '../../types';
 export default function SessionSetup() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [campaignId, setCampaignId] = useState<number | null>(null);
+  const [campaignId, setCampaignId] = useState<string | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [characters, setCharacters] = useState<Character[]>([]);
-  const [selectedCharacterIds, setSelectedCharacterIds] = useState<number[]>([]);
+  const [selectedCharacterIds, setSelectedCharacterIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -38,7 +38,7 @@ export default function SessionSetup() {
     }
   };
 
-  const handleToggleCharacter = (characterId: number) => {
+  const handleToggleCharacter = (characterId: string) => {
     setSelectedCharacterIds((prev) =>
       prev.includes(characterId)
         ? prev.filter((id) => id !== characterId)
@@ -133,7 +133,7 @@ export default function SessionSetup() {
             id="campaign"
             className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
             value={campaignId || ''}
-            onChange={(e) => setCampaignId(e.target.value ? parseInt(e.target.value) : null)}
+            onChange={(e) => setCampaignId(e.target.value || null)}
           >
             <option value="">No Campaign</option>
             {campaigns.map((campaign) => (

@@ -7,8 +7,8 @@ interface CharacterDetailSidebarProps {
   character: Character | null;
   open: boolean;
   onClose: () => void;
-  onEdit: (characterId: number) => void;
-  onDelete: (characterId: number) => void;
+  onEdit: (characterId: string) => void;
+  onDelete: (characterId: string) => void;
   onUpdate?: (updatedCharacter: Character) => void;
 }
 

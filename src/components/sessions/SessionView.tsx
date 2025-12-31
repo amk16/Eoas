@@ -5,27 +5,36 @@ import LiveScribe from '../LiveScribe';
 import { analyzeTranscript } from '../../services/analyzeService';
 import InitiativeTracker from './InitiativeTracker';
 import CharacterDetailSidebar from './CharacterDetailSidebar';
+import HealthEditModal from './HealthEditModal';
+import EventCreationModal from './EventCreationModal';
+import { logger } from '../../lib/logger';
 
 interface SessionCharacter {
   session_id: number;
-  character_id: number;
+  character_id: number | string;  // Can be string (Firestore) or number (legacy)
   character_name: string;
   starting_hp: number;
   current_hp: number;
   max_hp: number;
+  display_art_url?: string | null;
 }
 
 interface DamageEvent {
-  id: number;
-  session_id: number;
-  character_id: number;
-  character_name: string;
+  id: string | number;  // Can be string (Firestore) or number (legacy SQLite)
+  session_id: string | number;
+  character_id?: string | number;
+  character_name?: string;
   amount?: number;
-  type: 'damage' | 'healing' | 'spell_cast';
+  type: 'damage' | 'healing' | 'spell_cast' | 'initiative_roll' | 'turn_advance' | 'round_start' | 'status_condition_applied' | 'status_condition_removed' | 'combat_end' | 'buff_debuff_applied' | 'buff_debuff_removed';
   spell_name?: string;
   spell_level?: number;
+  initiative_value?: number;
+  round_number?: number;
+  condition_name?: string;
+  effect_name?: string;
+  effect_type?: 'buff' | 'debuff';
   timestamp: string;
-  transcript_segment: string | null;
+  transcript_segment?: string | null;
 }
 
 interface TranscriptSegment {
@@ -75,9 +84,19 @@ export default function SessionView() {
   const [analyzing, setAnalyzing] = useState(false);
   
   // Phase 2: Character detail sidebar state
-  const [selectedCharacterId, setSelectedCharacterId] = useState<number | null>(null);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   const [selectedCharacterName, setSelectedCharacterName] = useState<string | null>(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  
+  // Event deletion state
+  const [deletingEventId, setDeletingEventId] = useState<string | number | null>(null);
+  const [eventToDelete, setEventToDelete] = useState<DamageEvent | null>(null);
+  
+  // Health editing state
+  const [healthEditCharacter, setHealthEditCharacter] = useState<SessionCharacter | null>(null);
+  
+  // Event creation state
+  const [isEventCreationModalOpen, setIsEventCreationModalOpen] = useState(false);
   
   // Phase 1: Buffer for accumulating transcript with time-based analysis
   const transcriptBufferRef = useRef<string>('');
@@ -116,7 +135,6 @@ export default function SessionView() {
       // Set up interval to analyze every 25 seconds
       analysisTimerRef.current = setInterval(() => {
         if (transcriptBufferRef.current.trim().length > 0) {
-          console.log('⏰ 25-second interval reached, analyzing buffered transcript');
           triggerAnalysis();
         }
       }, ANALYSIS_INTERVAL_MS);
@@ -141,7 +159,6 @@ export default function SessionView() {
   useEffect(() => {
     // When session ends, analyze any remaining buffer
     if (session && session.status === 'ended' && transcriptBufferRef.current.trim().length > 0) {
-      console.log('Session ended, analyzing remaining transcript in buffer');
       const remainingTranscript = transcriptBufferRef.current;
       transcriptBufferRef.current = '';
       
@@ -151,7 +168,7 @@ export default function SessionView() {
         : remainingTranscript;
       
       analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
-        console.error('Error analyzing remaining transcript on session end:', err);
+        logger.error('Error analyzing remaining transcript on session end', err);
       });
     }
     
@@ -165,7 +182,6 @@ export default function SessionView() {
 
       // Analyze remaining buffer if session is active
       if (transcriptBufferRef.current.trim().length > 0 && id && session?.status === 'active') {
-        console.log('Component unmounting, analyzing remaining transcript in buffer');
         const remainingTranscript = transcriptBufferRef.current;
         transcriptBufferRef.current = '';
         
@@ -175,7 +191,7 @@ export default function SessionView() {
           : remainingTranscript;
         
         analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
-          console.error('Error analyzing remaining transcript on unmount:', err);
+          logger.error('Error analyzing remaining transcript on unmount', err);
         });
       }
     };
@@ -198,7 +214,7 @@ export default function SessionView() {
         setError(err.response?.data?.error || 'Failed to load session');
       } else {
         setRefreshError(err.response?.data?.error || 'Failed to refresh session');
-        console.error('Failed to refresh session', err);
+        logger.error('Failed to refresh session', err);
       }
     } finally {
       if (mode === 'initial') {
@@ -217,7 +233,7 @@ export default function SessionView() {
       setTranscriptSegments(response.data || []);
     } catch (err) {
       // Don't block the whole screen if transcripts fail to load
-      console.error('Failed to load transcripts', err);
+      logger.error('Failed to load transcripts', err);
     }
   };
 
@@ -239,7 +255,7 @@ export default function SessionView() {
       ...prev,
       {
         id: -1,
-        session_id: parseInt(id),
+        session_id: id as any, // Session ID is now a string, but TranscriptSegment interface still expects number
         client_chunk_id,
         client_timestamp_ms,
         text,
@@ -266,7 +282,7 @@ export default function SessionView() {
           return next;
         });
       } catch (err) {
-        console.error('Failed to persist transcript segment', err);
+        logger.error('Failed to persist transcript segment', err);
       }
     });
   };
@@ -276,7 +292,7 @@ export default function SessionView() {
     try {
       await api.delete(`/sessions/${id}/transcripts`);
     } catch (err) {
-      console.error('Failed to clear transcripts', err);
+      logger.error('Failed to clear transcripts', err);
     } finally {
       setTranscriptSegments([]);
     }
@@ -290,7 +306,7 @@ export default function SessionView() {
       const updated = res.data;
       setTranscriptSegments((prev) => prev.map((s) => (s.id === segmentId ? updated : s)));
     } catch (err) {
-      console.error('Failed to update transcript segment', err);
+      logger.error('Failed to update transcript segment', err);
     }
   };
 
@@ -302,6 +318,79 @@ export default function SessionView() {
     if (!msOrIso) return '';
     const d = typeof msOrIso === 'number' ? new Date(msOrIso) : new Date(msOrIso);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  };
+
+  const handleDeleteEvent = async (event: DamageEvent) => {
+    if (!id) return;
+    
+    try {
+      setDeletingEventId(event.id);
+      await api.delete(`/sessions/${id}/events/${event.id}`);
+      
+      // Refresh session data to reflect changes
+      await fetchSession({ mode: 'refresh' });
+      
+      // Close confirmation dialog if open
+      setEventToDelete(null);
+    } catch (err: any) {
+      logger.error('Failed to delete event', err);
+      alert(err.response?.data?.detail || err.response?.data?.error || 'Failed to delete event');
+    } finally {
+      setDeletingEventId(null);
+    }
+  };
+
+  const handleDeleteClick = (event: DamageEvent) => {
+    setEventToDelete(event);
+  };
+
+  const handleCancelDelete = () => {
+    setEventToDelete(null);
+  };
+
+  const getEventDescription = (event: DamageEvent): string => {
+    if (event.type === 'damage' || event.type === 'healing') {
+      return `${event.character_name || 'Unknown'} ${event.type === 'damage' ? 'took' : 'received'} ${event.amount} ${event.type === 'damage' ? 'damage' : 'healing'}`;
+    } else if (event.type === 'spell_cast') {
+      return `${event.character_name || 'Unknown'} cast ${event.spell_name}${event.spell_level !== undefined && event.spell_level > 0 ? ` (level ${event.spell_level})` : ''}`;
+    } else if (event.type === 'initiative_roll') {
+      return `${event.character_name || 'Unknown'} rolled initiative: ${event.initiative_value}`;
+    } else if (event.type === 'status_condition_applied') {
+      return `${event.character_name || 'Unknown'} had ${event.condition_name} applied`;
+    } else if (event.type === 'status_condition_removed') {
+      return `${event.character_name || 'Unknown'} had ${event.condition_name} removed`;
+    } else if (event.type === 'buff_debuff_applied' || event.type === 'buff_debuff_removed') {
+      const effectName = event.effect_name ? ` ${event.effect_name}` : ' effect';
+      return `${event.character_name || 'Unknown'} ${event.type === 'buff_debuff_applied' ? 'gained' : 'lost'}${effectName}`;
+    } else {
+      return `${event.type} event`;
+    }
+  };
+
+  const handleOpenHealthEdit = (character: SessionCharacter) => {
+    setHealthEditCharacter(character);
+  };
+
+  const handleCloseHealthEdit = () => {
+    setHealthEditCharacter(null);
+  };
+
+  const handleHealthEditSave = async () => {
+    await fetchSession({ mode: 'refresh' });
+  };
+
+  // Get character image URL - use display_art_url if available, otherwise placeholder
+  const getCharacterImageUrl = (character: SessionCharacter): string => {
+    if (character.display_art_url) {
+      // If the URL starts with /api, prepend the API base URL
+      if (character.display_art_url.startsWith('/api/')) {
+        const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+        return `${API_URL}${character.display_art_url}`;
+      }
+      return character.display_art_url;
+    }
+    // Placeholder image with character name
+    return `https://via.placeholder.com/512x512/000000/FFFFFF?text=${encodeURIComponent(character.character_name || 'Character')}`;
   };
 
   // Component to display time-based analysis status
@@ -366,65 +455,52 @@ export default function SessionView() {
     lastAnalysisTimeRef.current = now;
     setLastAnalysisTime(now);
     
-    console.log(`📊 Analyzing transcript (time-based, ${transcriptToAnalyze.length} chars)`);
-    console.log(`📄 Full context: "${transcriptToAnalyze}"`);
+    logger.debug('Triggering time-based transcript analysis', { 
+      transcriptLength: transcriptToAnalyze.length 
+    });
     
     // Trigger analysis (don't await to avoid blocking, but handle errors)
-    // Pass currentChunk as fallback in case backend doesn't return previous_chunk_for_next_analysis
-    analyzeBufferedTranscript(transcriptToAnalyze, currentChunk).catch(err => {
-      console.error('Error in buffered transcript analysis:', err);
+    analyzeBufferedTranscript(transcriptToAnalyze).catch(err => {
+      logger.error('Error in buffered transcript analysis', err);
     });
   };
 
   /**
    * Analyze the buffered transcript and process events
    */
-  const analyzeBufferedTranscript = async (transcriptToAnalyze: string, fallbackChunk?: string) => {
+  const analyzeBufferedTranscript = async (transcriptToAnalyze: string) => {
     if (!session || !id) return;
 
     // Only analyze if transcript has meaningful content
     if (transcriptToAnalyze.trim().length < 10) {
-      console.log('Transcript too short, skipping analysis');
       return;
     }
 
     try {
       setAnalyzing(true);
-      console.log(`🔍 Analyzing transcript:`, transcriptToAnalyze);
+      logger.debug('Analyzing transcript', { transcriptLength: transcriptToAnalyze.length });
       
-      const result = await analyzeTranscript(transcriptToAnalyze, parseInt(id));
-      
-      console.log('✅ Analysis complete:', result);
+      const result = await analyzeTranscript(transcriptToAnalyze, id);
 
       // Phase 4: Store previous_chunk_for_next_analysis if returned from backend
       // Check if property exists (even if empty string) to distinguish from undefined
       if (result.previous_chunk_for_next_analysis !== undefined) {
         previousChunkRef.current = result.previous_chunk_for_next_analysis;
-        if (result.previous_chunk_for_next_analysis) {
-          console.log(`📦 Stored previous_chunk_for_next_analysis (${result.previous_chunk_for_next_analysis.length} chars)`);
-        } else {
-          console.log(`📦 Stored empty previous_chunk_for_next_analysis (last event was at end of transcript)`);
-        }
-      } else if (fallbackChunk) {
-        // Fallback: use current chunk if backend doesn't return previous_chunk_for_next_analysis
-        previousChunkRef.current = fallbackChunk;
-        console.log(`📦 Stored fallback chunk (${fallbackChunk.length} chars)`);
       } else {
-        // No previous chunk and no fallback - clear it
+        // No previous chunk from backend - clear it
         previousChunkRef.current = '';
-        console.log(`📦 Cleared previous chunk (no data from backend)`);
       }
 
       // Phase 8: Save detected events to the database
       // Events are now saved directly by the backend in the /analyze endpoint
       // Just refresh the session data to show updated state
       if (result.events.length > 0) {
-        console.log(`✅ Backend saved ${result.events.length} event(s) directly`);
+        logger.info('Analysis complete - events detected', { eventCount: result.events.length });
         // Refresh session data to show updated HP, events, and other state
         await fetchSession({ mode: 'refresh' });
       }
     } catch (err: any) {
-      console.error('❌ Error analyzing transcript:', err);
+      logger.error('Error analyzing transcript', err);
       // Don't show error to user for every failed analysis, just log it
       // Analysis failures shouldn't break the transcription flow
     } finally {
@@ -452,7 +528,6 @@ export default function SessionView() {
 
     const currentBufferLength = transcriptBufferRef.current.trim().length;
     setBufferLength(currentBufferLength);
-    console.log(`📝 Transcript buffer: ${currentBufferLength} characters (analysis every ${ANALYSIS_INTERVAL_MS / 1000} seconds)`);
 
     // Persist committed segments to backend (maintained transcription)
     if (transcript && transcript.trim()) {
@@ -506,59 +581,66 @@ export default function SessionView() {
                 </span>
               ) : null}
               {session.status === 'active' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRecorderMounted(true);
-                    setRecording((v) => !v);
-                  }}
-                  className={[
-                    'shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-xl transition-colors text-sm font-medium border',
-                    recording
-                      ? 'bg-red-500/15 text-red-200 border-red-500/30 hover:bg-red-500/20'
-                      : 'bg-white/5 text-white border-white/10 hover:bg-white/10',
-                  ].join(' ')}
-                  title={recording ? 'Stop recording' : 'Start recording'}
-                >
-                  <span
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRecorderMounted(true);
+                      setRecording((v) => !v);
+                    }}
                     className={[
-                      'inline-block h-2 w-2 rounded-full',
-                      recording ? 'bg-red-400 animate-pulse' : 'bg-white/30',
+                      'shrink-0 inline-flex items-center gap-2 px-3 py-2 rounded-xl transition-colors text-sm font-medium border',
+                      recording
+                        ? 'bg-red-500/15 text-red-200 border-red-500/30 hover:bg-red-500/20'
+                        : 'bg-white/5 text-white border-white/10 hover:bg-white/10',
                     ].join(' ')}
-                    aria-hidden="true"
-                  />
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path
-                      d="M12 14a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+                    title={recording ? 'Stop recording' : 'Start recording'}
+                  >
+                    <span
+                      className={[
+                        'inline-block h-2 w-2 rounded-full',
+                        recording ? 'bg-red-400 animate-pulse' : 'bg-white/30',
+                      ].join(' ')}
+                      aria-hidden="true"
                     />
-                    <path
-                      d="M19 11a7 7 0 0 1-14 0"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M12 18v3"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                    <path
-                      d="M8 21h8"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  <span className="hidden sm:inline">{recording ? 'Recording' : 'Record'}</span>
-                </button>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 14a3 3 0 0 0 3-3V7a3 3 0 1 0-6 0v4a3 3 0 0 0 3 3Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M19 11a7 7 0 0 1-14 0"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M12 18v3"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                      <path
+                        d="M8 21h8"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                    <span className="hidden sm:inline">{recording ? 'Recording' : 'Record'}</span>
+                  </button>
+                  {!recording && (
+                    <span className="text-sm text-neutral-400">
+                      Press record to begin the session
+                    </span>
+                  )}
+                </>
               )}
             </div>
             <p className="text-neutral-300 mt-2">
@@ -715,8 +797,9 @@ export default function SessionView() {
       {session.status === 'active' && id && (
         <div className="mb-6">
           <InitiativeTracker 
-            sessionId={parseInt(id)} 
+            sessionId={id} 
             onUpdate={() => fetchSession({ mode: 'refresh' })}
+            refreshKey={session.events.length} // Refresh when events change
           />
         </div>
       )}
@@ -735,29 +818,73 @@ export default function SessionView() {
                   <div
                     key={char.character_id}
                     onClick={() => {
-                      setSelectedCharacterId(char.character_id);
+                      setSelectedCharacterId(String(char.character_id));
                       setSelectedCharacterName(char.character_name);
                       setIsSidebarOpen(true);
                     }}
                     className="border border-white/10 rounded-2xl p-4 bg-neutral-950/40 cursor-pointer hover:bg-neutral-950/60 transition-colors"
                   >
-                    <div className="flex justify-between items-center mb-2">
-                      <h3 className="font-medium text-white">{char.character_name}</h3>
-                      <span className="text-sm text-neutral-300">
-                        {char.current_hp} / {char.max_hp} HP
-                      </span>
-                    </div>
-                    <div className="w-full bg-white/10 rounded-full h-2">
-                      <div
-                        className={`h-2 rounded-full ${
-                          hpPercentage > 50
-                            ? 'bg-emerald-400'
-                            : hpPercentage > 25
-                            ? 'bg-amber-400'
-                            : 'bg-red-400'
-                        }`}
-                        style={{ width: `${hpPercentage}%` }}
-                      />
+                    <div className="flex gap-4">
+                      {/* Character Art Image */}
+                      <div className="w-20 h-20 shrink-0 rounded-xl overflow-hidden bg-neutral-900">
+                        <img
+                          src={getCharacterImageUrl(char)}
+                          alt={char.character_name}
+                          className="w-full h-full object-cover"
+                          onError={(e) => {
+                            // Fallback if image fails to load
+                            const target = e.target as HTMLImageElement;
+                            target.style.display = 'none';
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Character Info */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex justify-between items-center mb-2">
+                          <h3 className="font-medium text-white truncate">{char.character_name}</h3>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="text-sm text-neutral-300">
+                              {char.current_hp} / {char.max_hp} HP
+                            </span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenHealthEdit(char);
+                              }}
+                              className="p-1 hover:bg-white/10 rounded transition-colors text-neutral-400 hover:text-white"
+                              title="Edit HP"
+                              aria-label="Edit HP"
+                            >
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        <div className="w-full bg-white/10 rounded-full h-2">
+                          <div
+                            className={`h-2 rounded-full ${
+                              hpPercentage > 50
+                                ? 'bg-emerald-400'
+                                : hpPercentage > 25
+                                ? 'bg-amber-400'
+                                : 'bg-red-400'
+                            }`}
+                            style={{ width: `${hpPercentage}%` }}
+                          />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 );
@@ -768,7 +895,17 @@ export default function SessionView() {
 
         {/* Events */}
         <div className="bg-neutral-900/60 border border-neutral-800 rounded-2xl p-6">
-          <h2 className="text-xl font-semibold text-white mb-4">Event History</h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-xl font-semibold text-white">Event History</h2>
+            {session.status === 'active' && (
+              <button
+                onClick={() => setIsEventCreationModalOpen(true)}
+                className="px-3 py-2 bg-blue-500/15 text-blue-200 border border-blue-500/30 rounded-xl hover:bg-blue-500/20 transition-colors text-sm font-medium"
+              >
+                Create Event
+              </button>
+            )}
+          </div>
           {session.events.length === 0 ? (
             <p className="text-neutral-300">No events yet</p>
           ) : (
@@ -787,9 +924,9 @@ export default function SessionView() {
                   }`}
                 >
                   <div className="flex justify-between items-start">
-                    <div>
+                    <div className="flex-1">
                       <span className="font-medium text-white">
-                        {event.character_name}
+                        {event.character_name || 'Unknown'}
                       </span>
                       {event.type === 'spell_cast' ? (
                         <span className="ml-2 font-semibold text-purple-200">
@@ -798,7 +935,7 @@ export default function SessionView() {
                             <span className="text-purple-300"> (level {event.spell_level})</span>
                           )}
                         </span>
-                      ) : (
+                      ) : event.type === 'damage' || event.type === 'healing' ? (
                         <span
                           className={`ml-2 font-semibold ${
                             event.type === 'damage' ? 'text-red-200' : 'text-emerald-200'
@@ -807,11 +944,61 @@ export default function SessionView() {
                           {event.type === 'damage' ? '-' : '+'}
                           {event.amount} HP
                         </span>
+                      ) : event.type === 'initiative_roll' ? (
+                        <span className="ml-2 font-semibold text-blue-200">
+                          rolled initiative: {event.initiative_value}
+                        </span>
+                      ) : event.type === 'turn_advance' ? (
+                        <span className="ml-2 font-semibold text-yellow-200">
+                          turn advanced
+                        </span>
+                      ) : event.type === 'round_start' ? (
+                        <span className="ml-2 font-semibold text-cyan-200">
+                          round {event.round_number || 'started'}
+                        </span>
+                      ) : event.type === 'status_condition_applied' ? (
+                        <span className="ml-2 font-semibold text-orange-200">
+                          {event.condition_name} applied
+                        </span>
+                      ) : event.type === 'status_condition_removed' ? (
+                        <span className="ml-2 font-semibold text-orange-300">
+                          {event.condition_name} removed
+                        </span>
+                      ) : event.type === 'combat_end' ? (
+                        <span className="ml-2 font-semibold text-gray-300">
+                          combat ended
+                        </span>
+                      ) : (
+                        <span className="ml-2 font-semibold text-neutral-300">
+                          {event.type}
+                        </span>
                       )}
                     </div>
-                    <span className="text-xs text-neutral-400">
-                      {formatDate(event.timestamp)}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-xs text-neutral-400">
+                        {formatDate(event.timestamp)}
+                      </span>
+                      <button
+                        onClick={() => handleDeleteClick(event)}
+                        disabled={deletingEventId === event.id}
+                        className="p-1.5 hover:bg-white/10 rounded-lg transition-colors text-white hover:text-white/80 disabled:opacity-50 disabled:cursor-not-allowed"
+                        title="Delete event"
+                        aria-label="Delete event"
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                   {event.transcript_segment && (
                     <p className="text-sm text-neutral-300 mt-1 italic">
@@ -825,10 +1012,37 @@ export default function SessionView() {
         </div>
       </div>
 
+      {/* Health Edit Modal */}
+      {healthEditCharacter && id && (
+        <HealthEditModal
+          isOpen={true}
+          onClose={handleCloseHealthEdit}
+          characterId={healthEditCharacter.character_id}
+          characterName={healthEditCharacter.character_name}
+          currentHp={healthEditCharacter.current_hp}
+          maxHp={healthEditCharacter.max_hp}
+          sessionId={id}
+          onSave={handleHealthEditSave}
+        />
+      )}
+
+      {/* Event Creation Modal */}
+      {isEventCreationModalOpen && id && session && (
+        <EventCreationModal
+          isOpen={isEventCreationModalOpen}
+          onClose={() => setIsEventCreationModalOpen(false)}
+          sessionId={id}
+          characters={session.characters}
+          onEventCreated={async () => {
+            await fetchSession({ mode: 'refresh' });
+          }}
+        />
+      )}
+
       {/* Phase 2: Character Detail Sidebar */}
       {session.status === 'active' && id && (
         <CharacterDetailSidebar
-          sessionId={parseInt(id)}
+          sessionId={id as any}
           characterId={selectedCharacterId}
           characterName={selectedCharacterName}
           isOpen={isSidebarOpen}
@@ -839,6 +1053,61 @@ export default function SessionView() {
           }}
           onUpdate={() => fetchSession({ mode: 'refresh' })}
         />
+      )}
+
+      {/* Event Deletion Confirmation Dialog */}
+      {eventToDelete && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/50 z-50 transition-opacity"
+            onClick={handleCancelDelete}
+            aria-hidden="true"
+          />
+          
+          {/* Dialog */}
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <div className="bg-neutral-900 border border-neutral-800 rounded-2xl p-6 max-w-md w-full">
+              <h3 className="text-xl font-semibold text-white mb-4">Delete Event</h3>
+              
+              <p className="text-neutral-300 mb-2">
+                Are you sure you want to delete this event?
+              </p>
+              
+              <div className="bg-neutral-950 border border-neutral-800 rounded-lg p-3 mb-4">
+                <p className="text-sm text-neutral-200">
+                  {getEventDescription(eventToDelete)}
+                </p>
+                {eventToDelete.transcript_segment && (
+                  <p className="text-xs text-neutral-400 mt-2 italic">
+                    "{eventToDelete.transcript_segment}"
+                  </p>
+                )}
+              </div>
+              
+              <p className="text-sm text-amber-200/90 mb-4">
+                Warning: This will reverse the event's effects (restore HP, remove from initiative, etc.)
+              </p>
+              
+              <div className="flex gap-3 justify-end">
+                <button
+                  onClick={handleCancelDelete}
+                  disabled={deletingEventId !== null}
+                  className="px-4 py-2 bg-white/5 text-white border border-white/10 rounded-xl hover:bg-white/10 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => eventToDelete && handleDeleteEvent(eventToDelete)}
+                  disabled={deletingEventId !== null}
+                  className="px-4 py-2 bg-red-500/15 text-red-200 border border-red-500/30 rounded-xl hover:bg-red-500/20 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {deletingEventId === eventToDelete.id ? 'Deleting...' : 'Delete'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );

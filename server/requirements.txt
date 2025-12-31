@@ -17,4 +17,5 @@ google-generativeai
 google-cloud-storage
 google-genai>=1.56.0
 elevenlabs
+firebase-admin
 

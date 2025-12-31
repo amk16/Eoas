@@ -11,7 +11,7 @@ export default function CharacterForm() {
 
   const [name, setName] = useState('');
   const [maxHp, setMaxHp] = useState<number>(100);
-  const [campaignId, setCampaignId] = useState<number | null>(null);
+  const [campaignId, setCampaignId] = useState<string | null>(null);
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -130,7 +130,7 @@ export default function CharacterForm() {
             id="campaign"
             className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
             value={campaignId || ''}
-            onChange={(e) => setCampaignId(e.target.value ? parseInt(e.target.value) : null)}
+            onChange={(e) => setCampaignId(e.target.value || null)}
           >
             <option value="">No Campaign</option>
             {campaigns.map((campaign) => (

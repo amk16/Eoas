@@ -25,7 +25,7 @@ export default function CampaignWizardDrawer({
 }: {
   open: boolean;
   mode: Mode;
-  campaignId?: number | null;
+  campaignId?: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {

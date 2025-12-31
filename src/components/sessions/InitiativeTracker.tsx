@@ -1,11 +1,11 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import api from '../../services/api';
 import Stepper, { type StepperStep } from '../ui/Stepper';
 
 type ViewMode = 'list' | 'stepper';
 
 interface InitiativeCharacter {
-  character_id: number;
+  character_id: string | number;  // Can be string (Firestore) or number (legacy SQLite)
   character_name: string;
   initiative_value: number;
   turn_order: number;
@@ -14,23 +14,24 @@ interface InitiativeCharacter {
 interface CombatState {
   is_active: boolean;
   current_round: number;
-  current_turn_character_id: number | null;
+  current_turn_character_id: string | number | null;  // Can be string (Firestore) or number (legacy SQLite)
   current_turn_character_name: string | null;
   initiative_order: InitiativeCharacter[];
 }
 
 interface InitiativeTrackerProps {
-  sessionId: number;
+  sessionId: string | number;
   onUpdate?: () => void;
+  refreshKey?: number | string; // When this changes, refresh combat state
 }
 
-export default function InitiativeTracker({ sessionId, onUpdate }: InitiativeTrackerProps) {
+export default function InitiativeTracker({ sessionId, onUpdate, refreshKey }: InitiativeTrackerProps) {
   const [combatState, setCombatState] = useState<CombatState | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>('');
   const [viewMode, setViewMode] = useState<ViewMode>('list');
 
-  const fetchCombatState = async () => {
+  const fetchCombatState = useCallback(async () => {
     try {
       setLoading(true);
       setError('');
@@ -42,17 +43,21 @@ export default function InitiativeTracker({ sessionId, onUpdate }: InitiativeTra
     } finally {
       setLoading(false);
     }
-  };
+  }, [sessionId]);
 
+  // Fetch on mount and when sessionId changes
   useEffect(() => {
     if (sessionId) {
       fetchCombatState();
-      
-      // Poll for updates every 2 seconds
-      const interval = setInterval(fetchCombatState, 2000);
-      return () => clearInterval(interval);
     }
-  }, [sessionId]);
+  }, [sessionId, fetchCombatState]);
+
+  // Refresh when refreshKey changes (triggered by parent when events are created/updated)
+  useEffect(() => {
+    if (sessionId && refreshKey !== undefined) {
+      fetchCombatState();
+    }
+  }, [refreshKey, sessionId, fetchCombatState]);
 
   const handleAdvanceTurn = async () => {
     try {

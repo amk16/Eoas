@@ -14,8 +14,7 @@ export default function SessionList() {
   const drawerOpen = drawerMode === 'new';
   const presetCampaignId = useMemo(() => {
     const raw = searchParams.get('campaignId');
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : null;
+    return raw || null;
   }, [searchParams]);
 
   useEffect(() => {
@@ -35,7 +34,7 @@ export default function SessionList() {
     }
   };
 
-  const handleEndSession = async (id: number) => {
+  const handleEndSession = async (id: string) => {
     if (!confirm('Are you sure you want to end this session?')) {
       return;
     }

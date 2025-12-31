@@ -220,3 +220,215 @@ async def generate_character_image(character_data: Dict[str, Any]) -> Dict[str, 
         logger.error(f"[nano_banana_service] Error generating image: {str(e)}")
         raise Exception(f"Failed to generate character image: {str(e)}")
 
+
+def generate_campaign_art_prompt(campaign_data: Dict[str, Any]) -> str:
+    """
+    Generate an art prompt for a campaign banner image.
+    
+    Args:
+        campaign_data: Dictionary containing campaign information
+            - name: Campaign name
+            - description: Campaign description
+            - created_at: Creation timestamp (optional, for theme context)
+            - characters: List of characters (optional, for context)
+            - sessions: List of sessions (optional, for context)
+    
+    Returns:
+        JSON string containing the structured prompt
+    """
+    campaign_name = campaign_data.get('name', 'Campaign')
+    description = campaign_data.get('description', '')
+    created_at = campaign_data.get('created_at', '')
+    characters = campaign_data.get('characters', [])
+    sessions = campaign_data.get('sessions', [])
+    
+    # Extract theme and mood from description
+    description_lower = description.lower() if description else ''
+    
+    # Determine campaign theme based on description keywords
+    theme_keywords = {
+        'dark': ['dark', 'shadow', 'evil', 'corruption', 'necromancy', 'undead', 'vampire', 'demon'],
+        'epic': ['epic', 'legendary', 'ancient', 'dragon', 'god', 'divine', 'cosmic'],
+        'mystical': ['magic', 'arcane', 'mystical', 'enchantment', 'spell', 'wizard', 'sorcerer'],
+        'nature': ['forest', 'wild', 'druid', 'nature', 'animal', 'beast', 'plant'],
+        'urban': ['city', 'town', 'tavern', 'guild', 'merchant', 'noble', 'court'],
+        'adventure': ['quest', 'journey', 'travel', 'explore', 'treasure', 'dungeon'],
+        'war': ['war', 'battle', 'army', 'soldier', 'siege', 'conflict', 'military']
+    }
+    
+    detected_themes = []
+    for theme, keywords in theme_keywords.items():
+        if any(keyword in description_lower for keyword in keywords):
+            detected_themes.append(theme)
+    
+    # Default to adventure if no themes detected
+    primary_theme = detected_themes[0] if detected_themes else 'adventure'
+    
+    # Map themes to visual elements
+    theme_visuals = {
+        'dark': {
+            'palette': 'deep purples, blacks, dark blues, crimson accents',
+            'mood': 'ominous shadows, dramatic contrast, mysterious atmosphere',
+            'elements': 'twisted architecture, shadowy figures, dark magic, moonlit scenes'
+        },
+        'epic': {
+            'palette': 'gold, bronze, deep blues, radiant whites, celestial colors',
+            'mood': 'grandiose, awe-inspiring, legendary scale',
+            'elements': 'towering structures, divine light, ancient artifacts, cosmic phenomena'
+        },
+        'mystical': {
+            'palette': 'vibrant purples, blues, silvers, ethereal glows',
+            'mood': 'enchanting, otherworldly, magical',
+            'elements': 'floating runes, magical portals, arcane symbols, shimmering energy'
+        },
+        'nature': {
+            'palette': 'greens, browns, earth tones, natural sunlight',
+            'mood': 'wild, untamed, organic',
+            'elements': 'ancient trees, wildlife, natural formations, druidic circles'
+        },
+        'urban': {
+            'palette': 'warm browns, stone grays, warm torchlight, rich fabrics',
+            'mood': 'bustling, civilized, social',
+            'elements': 'architecture, marketplaces, guild halls, cityscapes'
+        },
+        'adventure': {
+            'palette': 'warm earth tones, sky blues, golden hour lighting',
+            'mood': 'heroic, exploratory, journey-focused',
+            'elements': 'maps, compasses, distant horizons, paths through varied terrain'
+        },
+        'war': {
+            'palette': 'steel grays, reds, blacks, smoke and fire',
+            'mood': 'intense, conflict-driven, martial',
+            'elements': 'battlefields, banners, weapons, fortifications'
+        }
+    }
+    
+    visuals = theme_visuals.get(primary_theme, theme_visuals['adventure'])
+    
+    # Build campaign context from metadata
+    context_parts = []
+    if characters:
+        context_parts.append(f"featuring {len(characters)} adventurer{'s' if len(characters) > 1 else ''}")
+    if sessions:
+        active_sessions = [s for s in sessions if s.get('status') == 'active']
+        if active_sessions:
+            context_parts.append(f"with {len(active_sessions)} active session{'s' if len(active_sessions) > 1 else ''}")
+    
+    context_text = ', '.join(context_parts) if context_parts else "an epic D&D campaign"
+    
+    # Create the prompt object
+    prompt_object = {
+        "subject": {
+            "title": f"{campaign_name} - Campaign Banner",
+            "campaign_identity": f"A fantasy D&D campaign banner for '{campaign_name}'. {description if description else 'An epic adventure awaits.'}",
+            "context": context_text
+        },
+        "visual_design": {
+            "theme": primary_theme,
+            "color_palette": visuals['palette'],
+            "atmospheric_mood": visuals['mood'],
+            "visual_elements": visuals['elements'],
+            "composition": "Wide horizontal banner format, cinematic landscape orientation, epic scope"
+        },
+        "artistic_direction": {
+            "style": "Epic fantasy campaign banner, cinematic digital painting, professional game art",
+            "vibrancy": "Rich, saturated colors with dramatic lighting, high production value",
+            "lighting": "Cinematic lighting with depth, dramatic shadows and highlights",
+            "framing": "BORDERLESS wide rectangular banner, edge-to-edge composition, landscape format optimized for 21:9 ultrawide aspect ratio",
+            "text": "NO TEXT AT ALL, NO WORDS, NO LETTERS, PURE VISUAL ART",
+            "focus": "Epic fantasy scene that captures the essence and atmosphere of the campaign"
+        }
+    }
+    
+    return json.dumps(prompt_object, indent=2)
+
+
+async def generate_campaign_image(campaign_data: Dict[str, Any]) -> Dict[str, str]:
+    """
+    Generate campaign banner art using Google Gemini image generation service.
+    
+    Args:
+        campaign_data: Dictionary containing campaign information
+            - id: Campaign ID
+            - name: Campaign name
+            - description: Campaign description
+            - created_at: Creation timestamp (optional)
+            - characters: List of characters (optional)
+            - sessions: List of sessions (optional)
+    
+    Returns:
+        Dictionary with 'image_url' and 'prompt' keys
+    """
+    campaign_name = campaign_data.get('name', 'Campaign')
+    logger.info(f"[nano_banana_service] generate_campaign_image called for campaign: {campaign_name}")
+    
+    prompt = generate_campaign_art_prompt(campaign_data)
+    logger.info(f"[nano_banana_service] Generated campaign prompt: {prompt}")
+    
+    gemini_api_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_api_key:
+        error_msg = "GEMINI_API_KEY not configured in environment variables"
+        logger.error(f"[nano_banana_service] {error_msg}")
+        raise ValueError(error_msg)
+    
+    try:
+        # Initialize Gemini client
+        client = genai.Client(api_key=gemini_api_key)
+        
+        logger.info(f"[nano_banana_service] Calling Gemini API for campaign banner generation")
+        
+        # Generate image using Gemini with 21:9 aspect ratio for wide rectangular banner
+        # Note: 21:9 is the widest available aspect ratio (ultrawide format)
+        response = client.models.generate_content(
+            model="gemini-3-pro-image-preview",
+            contents=[prompt],
+            config=types.GenerateContentConfig(
+                response_modalities=['IMAGE'],
+                image_config=types.ImageConfig(
+                    aspect_ratio="21:9",  # Wide rectangular banner aspect ratio (ultrawide)
+                    image_size="2K"
+                ),
+            )
+        )
+        
+        # Extract image from response
+        image = None
+        for part in response.parts:
+            if image := part.as_image():
+                break
+        
+        if not image:
+            logger.error("[nano_banana_service] No image found in API response")
+            raise ValueError("API response does not contain an image")
+        
+        # Generate a unique filename for the image
+        campaign_id = campaign_data.get('id', 'unknown')
+        image_filename = f"campaign_{campaign_id}_{uuid.uuid4().hex[:8]}.png"
+        
+        # Get image bytes directly from the Image object
+        if not hasattr(image, 'image_bytes') or image.image_bytes is None:
+            raise ValueError("Image object does not have image_bytes attribute")
+        image_bytes = image.image_bytes
+        
+        logger.info(f"[nano_banana_service] Uploading campaign banner to GCS: {image_filename}")
+        
+        # Upload to Google Cloud Storage and get signed URL
+        image_url = await upload_image_and_get_url(
+            image_bytes,
+            image_filename,
+            content_type='image/png'
+        )
+        
+        logger.info(f"[nano_banana_service] Successfully uploaded campaign banner to GCS: {image_filename}")
+        
+        result = {
+            'image_url': image_url,
+            'prompt': prompt,
+        }
+        logger.info(f"[nano_banana_service] Campaign banner generation completed for: {campaign_name}")
+        return result
+                
+    except Exception as e:
+        logger.error(f"[nano_banana_service] Error generating campaign banner: {str(e)}")
+        raise Exception(f"Failed to generate campaign banner: {str(e)}")
+

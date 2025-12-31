@@ -1,11 +1,10 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr
-import bcrypt
-import jwt
-import os
-from datetime import datetime, timedelta
-from ..db.database import get_database
-
+from ..services.firebase_service import (
+    create_user as firebase_create_user,
+    authenticate_user as firebase_authenticate_user,
+    create_custom_jwt
+)
 
 router = APIRouter()
 
@@ -22,91 +21,90 @@ class LoginRequest(BaseModel):
 
 @router.post('/register')
 async def register(request: RegisterRequest):
-    """Register a new user."""
+    """Register a new user with Firebase."""
     email = request.email
     password = request.password
     
-    if not password or len(password) < 6:
+    # Validate email format (Pydantic EmailStr should handle this, but double-check)
+    if not email or '@' not in email:
+        raise HTTPException(status_code=400, detail='Invalid email format')
+    
+    # Validate password
+    if not password:
+        raise HTTPException(status_code=400, detail='Password is required')
+    if len(password) < 6:
         raise HTTPException(status_code=400, detail='Password must be at least 6 characters')
     
-    db = get_database()
-    
-    # Check if user already exists
-    existing_user = db.execute('SELECT id FROM users WHERE email = ?', (email,)).fetchone()
-    if existing_user:
-        raise HTTPException(status_code=400, detail='User with this email already exists')
-    
-    # Hash password
-    password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-    
-    # Insert new user
-    cursor = db.execute('INSERT INTO users (email, password_hash) VALUES (?, ?)', (email, password_hash))
-    db.commit()
-    user_id = cursor.lastrowid
-    
-    # Generate JWT token
-    jwt_secret = os.getenv('JWT_SECRET')
-    if not jwt_secret:
-        raise HTTPException(status_code=500, detail='JWT secret not configured')
-    
-    token = jwt.encode(
-        {'userId': user_id, 'exp': datetime.utcnow() + timedelta(days=7)},
-        jwt_secret,
-        algorithm='HS256'
-    )
-    
-    return {
-        'message': 'User created successfully',
-        'token': token,
-        'user': {
-            'id': user_id,
-            'email': email
+    try:
+        # Create user in Firebase
+        user_data = firebase_create_user(email, password)
+        uid = user_data['uid']
+        
+        # Generate custom JWT token for frontend compatibility
+        token = create_custom_jwt(uid, email)
+        
+        return {
+            'message': 'User created successfully',
+            'token': token,
+            'user': {
+                'id': uid,
+                'email': email
+            }
         }
-    }
+    except RuntimeError as e:
+        # Firebase not initialized or configuration error
+        error_msg = str(e)
+        if 'not initialized' in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail='Authentication service is not available. Please check server configuration.'
+            )
+        raise HTTPException(status_code=500, detail=f'Configuration error: {str(e)}')
+    except ValueError as e:
+        # User already exists or validation error
+        error_msg = str(e)
+        if 'already exists' in error_msg.lower():
+            raise HTTPException(status_code=400, detail='User with this email already exists')
+        raise HTTPException(status_code=400, detail=error_msg)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Failed to create user: {str(e)}')
 
 
 @router.post('/login')
 async def login(request: LoginRequest):
-    """Login user."""
+    """Login user with Firebase."""
     email = request.email
     password = request.password
     
-    db = get_database()
-    
-    # Find user by email
-    user = db.execute(
-        'SELECT id, email, password_hash FROM users WHERE email = ?',
-        (email,)
-    ).fetchone()
-    
-    if not user:
-        raise HTTPException(status_code=401, detail='Invalid email or password')
-    
-    # Verify password
-    password_match = bcrypt.checkpw(
-        password.encode('utf-8'),
-        user['password_hash'].encode('utf-8')
-    )
-    if not password_match:
-        raise HTTPException(status_code=401, detail='Invalid email or password')
-    
-    # Generate JWT token
-    jwt_secret = os.getenv('JWT_SECRET')
-    if not jwt_secret:
-        raise HTTPException(status_code=500, detail='JWT secret not configured')
-    
-    token = jwt.encode(
-        {'userId': user['id'], 'exp': datetime.utcnow() + timedelta(days=7)},
-        jwt_secret,
-        algorithm='HS256'
-    )
-    
-    return {
-        'message': 'Login successful',
-        'token': token,
-        'user': {
-            'id': user['id'],
-            'email': user['email']
+    try:
+        # Authenticate user with Firebase
+        user_data = firebase_authenticate_user(email, password)
+        uid = user_data['uid']
+        user_email = user_data['email']
+        
+        # Generate custom JWT token for frontend compatibility
+        token = create_custom_jwt(uid, user_email)
+        
+        return {
+            'message': 'Login successful',
+            'token': token,
+            'user': {
+                'id': uid,
+                'email': user_email
+            }
         }
-    }
+    except RuntimeError as e:
+        # Firebase not initialized or configuration error
+        error_msg = str(e)
+        if 'not initialized' in error_msg.lower():
+            raise HTTPException(
+                status_code=503,
+                detail='Authentication service is not available. Please check server configuration.'
+            )
+        raise HTTPException(status_code=500, detail=f'Configuration error: {str(e)}')
+    except ValueError as e:
+        # Invalid credentials
+        raise HTTPException(status_code=401, detail='Invalid email or password')
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f'Login failed: {str(e)}')
 

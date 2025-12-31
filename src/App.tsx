@@ -12,7 +12,6 @@ import CharacterList from './components/characters/CharacterList';
 import { CharacterEditRedirect, CharacterNewRedirect } from './components/characters/CharacterRouteRedirects';
 import SessionList from './components/sessions/SessionList';
 import SessionView from './components/sessions/SessionView';
-import LiveScribe from './components/LiveScribe';
 import VoiceAssistant from './components/VoiceAssistant';
 import SectionShell from './components/layout/SectionShell';
 import { SessionNewRedirect } from './components/sessions/SessionRouteRedirects';
@@ -124,20 +123,10 @@ const App = () => {
             }
           />
           <Route
-            path="/scribe"
+            path="/ioun-silence/:conversationId?"
             element={
               <ProtectedRoute>
-                <SectionShell title="Live Scribe" subtitle="Real-time transcription">
-                  <LiveScribe />
-                </SectionShell>
-              </ProtectedRoute>
-            }
-          />
-          <Route
-            path="/voice-assistant"
-            element={
-              <ProtectedRoute>
-                <SectionShell title="Voice Assistant" subtitle="AI-powered D&D assistant">
+                <SectionShell title="Ioun" subtitle="AI-powered D&D assistant with faster silence detection">
                   <VoiceAssistant />
                 </SectionShell>
               </ProtectedRoute>

@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 import logging
 from ..middleware.auth import authenticate_token
-from ..db.database import get_database
+from ..db.firebase import get_firestore
 from ..services.gemini_service import analyze_transcript
 from ..services.transcript_correction_service import correct_transcript
 from ..services.event_types import get_event_type_by_name
@@ -17,72 +17,77 @@ router = APIRouter()
 
 class AnalyzeRequest(BaseModel):
     transcript: str
-    session_id: int
+    session_id: str
 
 
-def _get_combat_context(db: Any, session_id: int) -> Dict[str, Any]:
+async def _get_combat_context(db_firestore: Any, user_id: str, session_id: str) -> Dict[str, Any]:
     """
-    Fetch combat context for a session.
+    Fetch combat context for a session from Firestore.
     
     Returns:
         Dictionary with combat context:
         {
-            "current_turn_character_id": int | None,
+            "current_turn_character_id": str | None,
             "current_turn_character_name": str | None,
             "active_characters": [
-                {"id": int, "name": str, "turn_order": int}
+                {"id": str, "name": str, "turn_order": int}
             ],
             "is_combat_active": bool
         }
     """
-    # Get combat state
-    combat_state = db.execute(
-        'SELECT * FROM combat_state WHERE session_id = ?',
-        (session_id,)
-    ).fetchone()
+    session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(session_id))
+    
+    # Get combat state from Firestore
+    combat_state_ref = session_ref.collection('combat_state').document('current')
+    combat_state_doc = combat_state_ref.get()
     
     is_combat_active = False
     current_turn_character_id = None
     current_turn_character_name = None
     
-    if combat_state and combat_state['is_active']:
-        is_combat_active = True
-        current_turn_character_id = combat_state['current_turn_character_id']
+    if combat_state_doc.exists:
+        combat_state_data = combat_state_doc.to_dict()
+        is_combat_active = combat_state_data.get('is_active', False)
+        current_turn_character_id = combat_state_data.get('current_turn_character_id')
         
         # Get current turn character name if available
         if current_turn_character_id:
-            character = db.execute(
-                'SELECT name FROM characters WHERE id = ?',
-                (current_turn_character_id,)
-            ).fetchone()
-            if character:
-                current_turn_character_name = character['name']
+            char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(current_turn_character_id))
+            char_doc = char_ref.get()
+            if char_doc.exists:
+                char_data = char_doc.to_dict()
+                current_turn_character_name = char_data.get('name')
     
     # Get active characters in initiative order
     active_characters = []
     if is_combat_active:
-        initiative_rows = db.execute('''
-            SELECT 
-                io.character_id,
-                io.turn_order,
-                c.name
-            FROM initiative_order io
-            JOIN characters c ON io.character_id = c.id
-            WHERE io.session_id = ?
-            ORDER BY io.turn_order ASC
-        ''', (session_id,)).fetchall()
+        initiative_order_ref = session_ref.collection('initiative_order')
+        all_orders = list(initiative_order_ref.stream())
         
-        active_characters = [
-            {
-                "id": row['character_id'],
-                "name": row['name'],
-                "turn_order": row['turn_order']
-            }
-            for row in initiative_rows
-        ]
+        for doc in all_orders:
+            data = doc.to_dict()
+            character_id = data.get('character_id')
+            character_name = data.get('character_name', 'Unknown')
+            
+            # If character_name not in initiative_order, fetch from characters collection
+            if not character_name or character_name == 'Unknown':
+                char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(character_id))
+                char_doc = char_ref.get()
+                if char_doc.exists:
+                    char_data = char_doc.to_dict()
+                    character_name = char_data.get('name', 'Unknown')
+            
+            active_characters.append({
+                "id": str(character_id),
+                "name": character_name,
+                "turn_order": data.get('turn_order', 0)
+            })
+        
+        # Sort by turn_order
+        active_characters.sort(key=lambda x: x.get('turn_order', 0))
     
     return {
-        "current_turn_character_id": current_turn_character_id,
+        "current_turn_character_id": str(current_turn_character_id) if current_turn_character_id else None,
         "current_turn_character_name": current_turn_character_name,
         "active_characters": active_characters,
         "is_combat_active": is_combat_active
@@ -92,7 +97,7 @@ def _get_combat_context(db: Any, session_id: int) -> Dict[str, Any]:
 @router.post('/analyze')
 async def analyze(
     request: AnalyzeRequest,
-    user_id: int = Depends(authenticate_token)
+    user_id: str = Depends(authenticate_token)
 ) -> Dict[str, Any]:
     """Analyze transcript for damage/healing events."""
     logger.info("=" * 60)
@@ -102,33 +107,40 @@ async def analyze(
     logger.info(f"   Transcript preview: {request.transcript[:100]}...")
     
     try:
-        db = get_database()
+        db_firestore = get_firestore()
+        if not db_firestore:
+            logger.error('[ANALYZE] Firestore not initialized')
+            raise HTTPException(status_code=500, detail='Firestore not available')
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (request.session_id, user_id)
-        ).fetchone()
+        # Verify session belongs to user in Firestore
+        session_ref = db_firestore.collection('users').document(user_id).collection('sessions').document(str(request.session_id))
+        session_doc = session_ref.get()
         
-        if not session:
+        if not session_doc.exists:
             logger.warning(f"Session {request.session_id} not found for user {user_id}")
             raise HTTPException(status_code=404, detail='Session not found')
         
         logger.info(f"✓ Session {request.session_id} verified for user {user_id}")
         
-        # Get characters in the session
-        characters_rows = db.execute('''
-            SELECT 
-                c.id,
-                c.name,
-                sc.starting_hp,
-                sc.current_hp
-            FROM session_characters sc
-            JOIN characters c ON sc.character_id = c.id
-            WHERE sc.session_id = ?
-        ''', (request.session_id,)).fetchall()
+        # Get characters in the session from Firestore subcollection
+        session_characters_ref = session_ref.collection('session_characters')
+        session_characters_docs = session_characters_ref.stream()
         
-        characters = [dict(row) for row in characters_rows]
+        characters = []
+        for doc in session_characters_docs:
+            char_data = doc.to_dict()
+            # Get character details from Firestore
+            char_ref = db_firestore.collection('users').document(user_id).collection('characters').document(str(char_data.get('character_id')))
+            char_doc = char_ref.get()
+            
+            if char_doc.exists:
+                char_details = char_doc.to_dict()
+                characters.append({
+                    'id': char_data.get('character_id'),
+                    'name': char_data.get('character_name') or char_details.get('name', 'Unknown'),
+                    'starting_hp': char_data.get('starting_hp', char_details.get('max_hp', 100)),
+                    'current_hp': char_data.get('current_hp', char_details.get('max_hp', 100))
+                })
         
         if not characters:
             logger.warning(f"No characters found in session {request.session_id}")
@@ -155,8 +167,8 @@ async def analyze(
         else:
             logger.info("🔍 No marker found in transcript, analyzing full transcript")
         
-        # Get combat context for transcript correction and analysis
-        combat_context = _get_combat_context(db, request.session_id)
+        # Get combat context for transcript correction and analysis from Firestore
+        combat_context = await _get_combat_context(db_firestore, user_id, request.session_id)
         if combat_context['is_combat_active']:
             logger.info(f"⚔️  Combat is active - Current turn: {combat_context['current_turn_character_name'] or 'None'}, Active characters: {len(combat_context['active_characters'])}")
         else:
@@ -271,7 +283,7 @@ async def analyze(
             else:
                 previous_chunk_for_next_analysis = corrected_transcript
         
-        # Save events directly to database instead of returning them to frontend
+        # Save events directly to Firestore instead of returning them to frontend
         saved_events = []
         for i, event in enumerate(events, 1):
             try:
@@ -288,11 +300,13 @@ async def analyze(
                     continue
                 
                 # Save event using the event type's handler
+                # Pass Firestore session reference and user_id
                 saved_event = await event_type.handle_event(
                     event,
-                    request.session_id,
+                    request.session_id,  # Pass string session_id
                     user_id,
-                    db
+                    db_firestore,  # Pass Firestore instead of SQLite
+                    session_ref  # Pass session reference for subcollections
                 )
                 saved_events.append(saved_event)
                 
@@ -322,9 +336,7 @@ async def analyze(
                 logger.info(f"   ✓ Saved event {i}: {event_desc}")
                 
             except Exception as e:
-                logger.error(f"   ❌ Failed to save event {i}: {e}")
-                import traceback
-                logger.debug(traceback.format_exc())
+                logger.exception(f"   ❌ Failed to save event {i}: {e}")
                 # Continue processing other events even if one fails
         
         logger.info(f"💾 Saved {len(saved_events)} event(s) to database")
@@ -348,10 +360,7 @@ async def analyze(
         logger.error(f"ValueError in analyze endpoint: {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        import traceback
-        error_trace = traceback.format_exc()
-        logger.error(f"❌ Analysis error: {e}")
-        logger.error(f"Traceback: {error_trace}")
+        logger.exception(f"❌ Analysis error: {e}")
         raise HTTPException(
             status_code=500,
             detail=f'Failed to analyze transcript: {str(e)}'

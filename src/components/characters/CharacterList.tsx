@@ -11,20 +11,18 @@ export default function CharacterList() {
   const [error, setError] = useState('');
   const [searchParams, setSearchParams] = useSearchParams();
 
-  const [selectedCharacterId, setSelectedCharacterId] = useState<number | null>(null);
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
   
   const drawerMode = searchParams.get('drawer'); // 'new' | 'edit' | null
   const drawerOpen = drawerMode === 'new' || drawerMode === 'edit';
   const editId = useMemo(() => {
     if (drawerMode !== 'edit') return null;
     const raw = searchParams.get('id');
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : null;
+    return raw || null;
   }, [drawerMode, searchParams]);
   const presetCampaignId = useMemo(() => {
     const raw = searchParams.get('campaignId');
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) ? n : null;
+    return raw || null;
   }, [searchParams]);
 
   const selectedCharacter = useMemo(() => {
@@ -49,7 +47,7 @@ export default function CharacterList() {
     }
   };
 
-  const handleCardClick = (characterId: number) => {
+  const handleCardClick = (characterId: string) => {
     setSelectedCharacterId(characterId);
   };
 
@@ -57,18 +55,18 @@ export default function CharacterList() {
     setSelectedCharacterId(null);
   };
 
-  const handleSidebarEdit = (characterId: number) => {
+  const handleSidebarEdit = (characterId: string) => {
     setSelectedCharacterId(null);
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.set('drawer', 'edit');
-      next.set('id', String(characterId));
+      next.set('id', characterId);
       next.delete('campaignId');
       return next;
     });
   };
 
-  const handleSidebarDelete = async (characterId: number) => {
+  const handleSidebarDelete = async (characterId: string) => {
     try {
       await api.delete(`/characters/${characterId}`);
       setCharacters(characters.filter((c) => c.id !== characterId));

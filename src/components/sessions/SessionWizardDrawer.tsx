@@ -7,8 +7,8 @@ import Stepper, { type StepperStep } from '../ui/Stepper';
 
 type SessionDraft = {
   name: string;
-  campaign_id: number | null;
-  character_ids: number[];
+  campaign_id: string | null;
+  character_ids: string[];
 };
 
 const steps: StepperStep[] = [
@@ -17,19 +17,13 @@ const steps: StepperStep[] = [
   { id: 'review', title: 'Review', description: 'Confirm & start' },
 ];
 
-function parseIntOrNull(v: string | null): number | null {
-  if (!v) return null;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
 export default function SessionWizardDrawer({
   open,
   presetCampaignId,
   onClose,
 }: {
   open: boolean;
-  presetCampaignId?: number | null;
+  presetCampaignId?: string | null;
   onClose: () => void;
 }) {
   const navigate = useNavigate();
@@ -71,7 +65,7 @@ export default function SessionWizardDrawer({
     return { ok: issues.length === 0, issues };
   }, [draft.name, draft.character_ids.length]);
 
-  const toggleCharacter = (id: number) => {
+  const toggleCharacter = (id: string) => {
     setDraft((d) => ({
       ...d,
       character_ids: d.character_ids.includes(id) ? d.character_ids.filter((x) => x !== id) : [...d.character_ids, id],
@@ -190,7 +184,7 @@ export default function SessionWizardDrawer({
                   <label className="block text-sm font-medium text-white/80 mb-2">Campaign (Optional)</label>
                   <select
                     value={draft.campaign_id ?? ''}
-                    onChange={(e) => setDraft((d) => ({ ...d, campaign_id: parseIntOrNull(e.target.value) }))}
+                    onChange={(e) => setDraft((d) => ({ ...d, campaign_id: e.target.value || null }))}
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
                   >
                     <option value="">No Campaign</option>

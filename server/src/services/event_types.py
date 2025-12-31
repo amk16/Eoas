@@ -18,8 +18,81 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException
+from firebase_admin import firestore
 
 logger = logging.getLogger(__name__)
+
+
+def save_event_to_firestore(
+    session_ref: Any,
+    event_type: str,
+    event_data: Dict[str, Any],
+    character_id: Optional[str] = None,
+    character_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Helper function to save an event to Firestore events subcollection.
+    
+    Args:
+        session_ref: Firestore session document reference
+        event_type: Type of event (e.g., 'damage', 'healing', 'initiative_roll')
+        event_data: Event data dictionary
+        character_id: Character ID (optional, extracted from event_data if not provided)
+        character_name: Character name (optional, extracted from event_data if not provided)
+    
+    Returns:
+        Dictionary containing the saved event data with id and timestamp
+    """
+    events_ref = session_ref.collection('events')
+    event_doc_ref = events_ref.document()
+    
+    # Extract character info if not provided
+    if not character_id:
+        character_id = str(event_data.get('character_id', ''))
+    if not character_name:
+        character_name = event_data.get('character_name', 'Unknown')
+    
+    # Build event document data
+    event_doc_data = {
+        'type': event_type,
+        'character_id': character_id,
+        'character_name': character_name,
+        'timestamp': firestore.SERVER_TIMESTAMP,
+    }
+    
+    # Add type-specific fields
+    if 'amount' in event_data:
+        event_doc_data['amount'] = event_data['amount']
+    if 'initiative_value' in event_data:
+        event_doc_data['initiative_value'] = event_data['initiative_value']
+    if 'transcript_segment' in event_data:
+        event_doc_data['transcript_segment'] = event_data.get('transcript_segment')
+    if 'spell_name' in event_data:
+        event_doc_data['spell_name'] = event_data.get('spell_name')
+    if 'spell_level' in event_data:
+        event_doc_data['spell_level'] = event_data.get('spell_level')
+    if 'round_number' in event_data:
+        event_doc_data['round_number'] = event_data.get('round_number')
+    if 'condition_name' in event_data:
+        event_doc_data['condition_name'] = event_data.get('condition_name')
+    if 'effect_name' in event_data:
+        event_doc_data['effect_name'] = event_data.get('effect_name')
+    if 'effect_type' in event_data:
+        event_doc_data['effect_type'] = event_data.get('effect_type')
+    
+    # Save to Firestore
+    event_doc_ref.set(event_doc_data)
+    event_id = event_doc_ref.id
+    
+    # Get the created event
+    event_doc = event_doc_ref.get()
+    result = event_doc.to_dict()
+    result['id'] = event_id
+    
+    # Convert Firestore timestamp to string
+    if 'timestamp' in result and hasattr(result['timestamp'], 'isoformat'):
+        result['timestamp'] = result['timestamp'].isoformat()
+    
+    return result
 
 # Registry to hold all registered event types
 _event_registry: Dict[str, 'EventType'] = {}
@@ -68,17 +141,19 @@ class EventType(ABC):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
         """Processes the event (e.g., save to database, update character state).
         
         Args:
             event_data: The validated event data
-            session_id: The session ID
+            session_id: The session ID (string from Firestore)
             user_id: The user ID (for authorization)
-            db: Database connection
+            db_firestore: Firestore database client
+            session_ref: Firestore session document reference
             
         Returns:
             Dictionary containing the created/processed event data
@@ -134,12 +209,12 @@ class DamageEventType(EventType):
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid amount type: {event_data[field]}")
                     return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
             elif field == 'amount' and event_data[field] <= 0:
                 logger.warning(f"Amount must be positive: {event_data[field]}")
                 return False
@@ -149,88 +224,78 @@ class DamageEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle damage event: save to database and update character HP."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        """Handle damage event: save to Firestore and update character HP."""
+        character_id = str(event_data['character_id'])
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
-        # Verify character belongs to user
-        character = db.execute(
-            'SELECT * FROM characters WHERE id = ? AND user_id = ?',
-            (event_data['character_id'], user_id)
-        ).fetchone()
+        session_character_data = session_character_doc.to_dict()
+        current_hp = session_character_data.get('current_hp', session_character_data.get('starting_hp', 100))
         
-        if not character:
+        # Verify character belongs to user
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        
+        if not character_doc.exists:
             raise HTTPException(
                 status_code=404,
                 detail='Character not found'
             )
         
-        # Use transaction to ensure both operations succeed
+        character_data = character_doc.to_dict()
+        character_name = character_data.get('name', 'Unknown')
+        
         try:
             # Calculate new HP (damage reduces HP, minimum 0)
-            current_hp = session_character['current_hp']
             new_hp = max(0, current_hp - event_data['amount'])
             
-            # Insert damage event
-            cursor = db.execute(
-                '''INSERT INTO damage_events 
-                   (session_id, character_id, amount, type, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['amount'],
-                    'damage',
-                    event_data.get('transcript_segment')
-                )
-            )
-            event_id = cursor.lastrowid
+            # Save event to Firestore subcollection
+            events_ref = session_ref.collection('events')
+            event_doc_ref = events_ref.document()
             
-            # Update character's current HP
-            db.execute(
-                'UPDATE session_characters SET current_hp = ? WHERE session_id = ? AND character_id = ?',
-                (new_hp, session_id, event_data['character_id'])
-            )
+            from firebase_admin import firestore
+            event_data_firestore = {
+                'type': 'damage',
+                'character_id': character_id,
+                'character_name': character_name,
+                'amount': event_data['amount'],
+                'transcript_segment': event_data.get('transcript_segment'),
+                'timestamp': firestore.SERVER_TIMESTAMP,
+            }
             
-            # Commit both operations together
-            db.commit()
+            event_doc_ref.set(event_data_firestore)
+            event_id = event_doc_ref.id
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    de.*,
-                    c.name as character_name
-                FROM damage_events de
-                JOIN characters c ON de.character_id = c.id
-                WHERE de.id = ?
-            ''', (event_id,)).fetchone()
+            # Update character's current HP in session_characters
+            session_character_ref.update({
+                'current_hp': new_hp
+            })
             
-            return dict(event_row)
+            # Get the created event
+            event_doc = event_doc_ref.get()
+            event_data_result = event_doc.to_dict()
+            event_data_result['id'] = event_id
+            
+            # Convert Firestore timestamp to string
+            if 'timestamp' in event_data_result and hasattr(event_data_result['timestamp'], 'isoformat'):
+                event_data_result['timestamp'] = event_data_result['timestamp'].isoformat()
+            
+            return event_data_result
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling damage event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -280,12 +345,12 @@ class HealingEventType(EventType):
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid amount type: {event_data[field]}")
                     return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
             elif field == 'amount' and event_data[field] <= 0:
                 logger.warning(f"Amount must be positive: {event_data[field]}")
                 return False
@@ -295,89 +360,62 @@ class HealingEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle healing event: save to database and update character HP."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        """Handle healing event: save to Firestore and update character HP."""
+        character_id = str(event_data['character_id'])
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
-        # Verify character belongs to user
-        character = db.execute(
-            'SELECT * FROM characters WHERE id = ? AND user_id = ?',
-            (event_data['character_id'], user_id)
-        ).fetchone()
+        session_character_data = session_character_doc.to_dict()
+        current_hp = session_character_data.get('current_hp', session_character_data.get('starting_hp', 100))
         
-        if not character:
+        # Verify character belongs to user and get max_hp
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        
+        if not character_doc.exists:
             raise HTTPException(
                 status_code=404,
                 detail='Character not found'
             )
         
-        # Use transaction to ensure both operations succeed
+        character_data = character_doc.to_dict()
+        character_name = character_data.get('name', 'Unknown')
+        max_hp = character_data.get('max_hp', 100)
+        
         try:
             # Calculate new HP (healing increases HP, maximum max_hp)
-            current_hp = session_character['current_hp']
-            max_hp = character['max_hp']
             new_hp = min(max_hp, current_hp + event_data['amount'])
             
-            # Insert healing event
-            cursor = db.execute(
-                '''INSERT INTO damage_events 
-                   (session_id, character_id, amount, type, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['amount'],
-                    'healing',
-                    event_data.get('transcript_segment')
-                )
-            )
-            event_id = cursor.lastrowid
-            
-            # Update character's current HP
-            db.execute(
-                'UPDATE session_characters SET current_hp = ? WHERE session_id = ? AND character_id = ?',
-                (new_hp, session_id, event_data['character_id'])
+            # Save event to Firestore using helper function
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'healing',
+                event_data,
+                character_id,
+                character_name
             )
             
-            # Commit both operations together
-            db.commit()
+            # Update character's current HP in session_characters
+            session_character_ref.update({
+                'current_hp': new_hp
+            })
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    de.*,
-                    c.name as character_name
-                FROM damage_events de
-                JOIN characters c ON de.character_id = c.id
-                WHERE de.id = ?
-            ''', (event_id,)).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling healing event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -423,152 +461,210 @@ class InitiativeRollEventType(EventType):
                 except (ValueError, TypeError):
                     logger.warning(f"Invalid initiative_value type: {event_data[field]}")
                     return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
         
         return True
     
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle initiative roll: save event and update initiative order."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        """Handle initiative roll: save event to Firestore and update initiative order in SQLite."""
+        character_id = str(event_data['character_id'])
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
+        
         try:
-            # Insert combat event
-            cursor = db.execute(
-                '''INSERT INTO combat_events 
-                   (session_id, character_id, event_type, initiative_value, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    'initiative_roll',
-                    event_data['initiative_value'],
-                    event_data.get('transcript_segment')
-                )
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'initiative_roll',
+                event_data,
+                character_id,
+                character_name
             )
-            event_id = cursor.lastrowid
             
-            # Get or create combat state
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id,)
-            ).fetchone()
+            # Save combat state to Firestore
+            combat_state_ref = session_ref.collection('combat_state').document('current')
+            combat_state_doc = combat_state_ref.get()
             
-            if not combat_state:
+            if not combat_state_doc.exists:
                 # Initialize combat state
-                db.execute(
-                    '''INSERT INTO combat_state (session_id, current_round, is_active)
-                       VALUES (?, 1, 1)''',
-                    (session_id,)
-                )
+                combat_state_ref.set({
+                    'is_active': True,
+                    'current_round': 1,
+                    'current_turn_character_id': None,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
             else:
-                # If combat state exists but is inactive, reactivate it
-                # This handles the case where combat ended and a new initiative roll starts combat again
-                if not combat_state['is_active']:
+                combat_state_data = combat_state_doc.to_dict()
+                if not combat_state_data.get('is_active', False):
                     # Clear old initiative order when starting a new combat
-                    db.execute(
-                        'DELETE FROM initiative_order WHERE session_id = ?',
-                        (session_id,)
-                    )
-                    db.execute(
-                        '''UPDATE combat_state 
-                           SET is_active = 1, current_round = 1, current_turn_character_id = NULL
-                           WHERE session_id = ?''',
-                        (session_id,)
-                    )
+                    initiative_order_ref = session_ref.collection('initiative_order')
+                    for doc in initiative_order_ref.stream():
+                        doc.reference.delete()
+                    
+                    # Reactivate combat
+                    combat_state_ref.update({
+                        'is_active': True,
+                        'current_round': 1,
+                        'current_turn_character_id': None,
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
                     logger.info(f"Reactivating combat for session {session_id} after new initiative roll.")
             
-            # Update or insert initiative order
-            db.execute(
-                '''INSERT OR REPLACE INTO initiative_order 
-                   (session_id, character_id, initiative_value, turn_order)
-                   VALUES (?, ?, ?, 
-                       COALESCE((SELECT MAX(turn_order) FROM initiative_order WHERE session_id = ?), 0) + 1)''',
-                (session_id, event_data['character_id'], event_data['initiative_value'], session_id)
-            )
+            # Save or update initiative order in Firestore
+            initiative_order_ref = session_ref.collection('initiative_order').document(character_id)
+            initiative_order_ref.set({
+                'character_id': character_id,
+                'character_name': character_name,
+                'initiative_value': event_data['initiative_value'],
+                'turn_order': 0,  # Will be recalculated
+                'updated_at': firestore.SERVER_TIMESTAMP
+            })
             
-            # Reorder initiative by initiative_value (descending)
-            # Get all initiative entries for this session
-            initiative_rows = db.execute(
-                '''SELECT character_id, initiative_value 
-                   FROM initiative_order 
-                   WHERE session_id = ? 
-                   ORDER BY initiative_value DESC, character_id ASC''',
-                (session_id,)
-            ).fetchall()
+            # Get all initiative orders and recalculate turn_order
+            all_initiative_orders = session_ref.collection('initiative_order').stream()
+            initiative_list = []
+            for doc in all_initiative_orders:
+                data = doc.to_dict()
+                initiative_list.append({
+                    'character_id': data['character_id'],
+                    'initiative_value': data['initiative_value'],
+                    'timestamp': data.get('updated_at')
+                })
             
-            # Update turn_order based on sorted initiative
-            for idx, row in enumerate(initiative_rows, start=1):
-                db.execute(
-                    'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
-                    (idx, session_id, row['character_id'])
-                )
+            # Sort by initiative value (descending), then by character_id for consistency
+            initiative_list.sort(key=lambda x: (x['initiative_value'], str(x['character_id'])), reverse=True)
             
-            # If no current turn is set, set it to the first character
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id,)
-            ).fetchone()
+            # Update turn_order for each
+            for idx, item in enumerate(initiative_list, start=1):
+                order_ref = session_ref.collection('initiative_order').document(str(item['character_id']))
+                order_ref.update({
+                    'turn_order': idx,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
             
-            if combat_state and not combat_state['current_turn_character_id']:
-                first_char = db.execute(
-                    '''SELECT character_id FROM initiative_order 
-                       WHERE session_id = ? 
-                       ORDER BY turn_order ASC LIMIT 1''',
-                    (session_id,)
+            # Set first character as current turn if not set
+            combat_state_data = combat_state_ref.get().to_dict()
+            if not combat_state_data.get('current_turn_character_id'):
+                if initiative_list:
+                    first_char_id = initiative_list[0]['character_id']
+                    combat_state_ref.update({
+                        'current_turn_character_id': first_char_id,
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
+            
+            # Also try to update SQLite for legacy compatibility (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Get or create combat state in SQLite
+                combat_state = db.execute(
+                    'SELECT * FROM combat_state WHERE session_id = ?',
+                    (session_id_int,)
                 ).fetchone()
                 
-                if first_char:
+                if not combat_state:
                     db.execute(
-                        'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
-                        (first_char['character_id'], session_id)
+                        '''INSERT INTO combat_state (session_id, current_round, is_active)
+                           VALUES (?, 1, 1)''',
+                        (session_id_int,)
                     )
+                else:
+                    if not combat_state['is_active']:
+                        db.execute(
+                            'DELETE FROM initiative_order WHERE session_id = ?',
+                            (session_id_int,)
+                        )
+                        db.execute(
+                            '''UPDATE combat_state 
+                               SET is_active = 1, current_round = 1, current_turn_character_id = NULL
+                               WHERE session_id = ?''',
+                            (session_id_int,)
+                        )
+                
+                # Update initiative order in SQLite
+                db.execute(
+                    '''INSERT OR REPLACE INTO initiative_order 
+                       (session_id, character_id, initiative_value, turn_order)
+                       VALUES (?, ?, ?, 
+                           COALESCE((SELECT MAX(turn_order) FROM initiative_order WHERE session_id = ?), 0) + 1)''',
+                    (session_id_int, character_id_int, event_data['initiative_value'], session_id_int)
+                )
+                
+                # Reorder initiative by initiative_value (descending)
+                initiative_rows = db.execute(
+                    '''SELECT character_id, initiative_value 
+                       FROM initiative_order 
+                       WHERE session_id = ? 
+                       ORDER BY initiative_value DESC, character_id ASC''',
+                    (session_id_int,)
+                ).fetchall()
+                
+                # Update turn_order based on sorted initiative
+                for idx, row in enumerate(initiative_rows, start=1):
+                    db.execute(
+                        'UPDATE initiative_order SET turn_order = ? WHERE session_id = ? AND character_id = ?',
+                        (idx, session_id_int, row['character_id'])
+                    )
+                
+                # Set first character as current turn if not set
+                combat_state = db.execute(
+                    'SELECT * FROM combat_state WHERE session_id = ?',
+                    (session_id_int,)
+                ).fetchone()
+                
+                if combat_state and not combat_state['current_turn_character_id']:
+                    first_char = db.execute(
+                        '''SELECT character_id FROM initiative_order 
+                           WHERE session_id = ? 
+                           ORDER BY turn_order ASC LIMIT 1''',
+                        (session_id_int,)
+                    ).fetchone()
+                    
+                    if first_char:
+                        db.execute(
+                            'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
+                            (first_char['character_id'], session_id_int)
+                        )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (Firestore is the source of truth)
+                pass
             
-            db.commit()
-            
-            # Get the created event
-            event_row = db.execute('''
-                SELECT 
-                    ce.*,
-                    c.name as character_name
-                FROM combat_events ce
-                JOIN characters c ON ce.character_id = c.id
-                WHERE ce.id = ?
-            ''', (event_id,)).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling initiative roll event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -621,9 +717,10 @@ DO NOT DETECT phrases like:
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
         """Handle turn advance: move to next character in initiative order.
         
@@ -631,141 +728,198 @@ DO NOT DETECT phrases like:
         skip processing to avoid duplicate advances from phrases like "I end my turn"
         followed by "beginning the next turn".
         """
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
         try:
-            # Deduplication: Check for recent turn advance events (within 5 seconds)
-            # This prevents duplicate turn advances from phrases like "I end my turn" 
-            # followed by "beginning the next turn" which Gemini might detect as two events
+            # Deduplication: Check for recent turn advance events in Firestore (within 5 seconds)
             import datetime
+            from firebase_admin import firestore as firestore_module
             time_window_seconds = 5
-            cutoff_time = datetime.datetime.now() - datetime.timedelta(seconds=time_window_seconds)
+            cutoff_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=time_window_seconds)
             
-            # SQLite stores timestamps as strings, so we need to compare as strings
-            # Format: 'YYYY-MM-DD HH:MM:SS'
-            cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
+            # Check Firestore for recent turn_advance events
+            # Note: We order by timestamp only (single-field index) and filter by type in memory
+            # to avoid requiring a composite index
+            events_ref = session_ref.collection('events')
+            # Fetch recent events ordered by timestamp, then filter by type in memory
+            recent_events = events_ref.order_by('timestamp', direction=firestore_module.Query.DESCENDING).limit(10).stream()
             
-            recent_turn_advance = db.execute(
-                '''SELECT id, timestamp FROM combat_events 
-                   WHERE session_id = ? 
-                   AND event_type = 'turn_advance'
-                   AND datetime(timestamp) > datetime(?)
-                   ORDER BY timestamp DESC
-                   LIMIT 1''',
-                (session_id, cutoff_str)
-            ).fetchone()
+            recent_turn_advance = None
+            for doc in recent_events:
+                event_data_check = doc.to_dict()
+                # Filter for turn_advance events in memory
+                if event_data_check.get('type') != 'turn_advance':
+                    continue
+                    
+                if 'timestamp' in event_data_check:
+                    event_time = event_data_check['timestamp']
+                    if hasattr(event_time, 'timestamp'):
+                        # Firestore timestamp
+                        if event_time.timestamp() > cutoff_time.timestamp():
+                            recent_turn_advance = {'id': doc.id, 'data': event_data_check}
+                            break  # Found the most recent one within window
+                    elif isinstance(event_time, datetime.datetime):
+                        if event_time > cutoff_time:
+                            recent_turn_advance = {'id': doc.id, 'data': event_data_check}
+                            break  # Found the most recent one within window
             
             if recent_turn_advance:
                 logger.info(
                     f"Turn advance deduplication: Skipping duplicate turn advance. "
-                    f"Last turn advance was {recent_turn_advance['timestamp']} "
-                    f"(within {time_window_seconds} second window)"
+                    f"Last turn advance was within {time_window_seconds} second window"
                 )
-                # Return the recent event instead of creating a new one
-                # This prevents the turn from advancing twice
-                event_row = db.execute(
-                    'SELECT * FROM combat_events WHERE id = ?',
-                    (recent_turn_advance['id'],)
-                ).fetchone()
-                return dict(event_row)
+                result = recent_turn_advance['data'].copy()
+                result['id'] = recent_turn_advance['id']
+                if 'timestamp' in result and hasattr(result['timestamp'], 'isoformat'):
+                    result['timestamp'] = result['timestamp'].isoformat()
+                return result
             
-            # Insert combat event
-            cursor = db.execute(
-                '''INSERT INTO combat_events 
-                   (session_id, event_type, transcript_segment)
-                   VALUES (?, ?, ?)''',
-                (
-                    session_id,
-                    'turn_advance',
-                    event_data.get('transcript_segment')
-                )
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'turn_advance',
+                event_data
             )
-            event_id = cursor.lastrowid
             
-            # Get combat state
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id,)
-            ).fetchone()
+            # Update combat state in Firestore
+            combat_state_ref = session_ref.collection('combat_state').document('current')
+            combat_state_doc = combat_state_ref.get()
             
-            if not combat_state:
+            if not combat_state_doc.exists:
                 raise HTTPException(
                     status_code=400,
                     detail='Combat not started. Roll initiative first.'
                 )
             
-            # Get current turn character
-            current_char_id = combat_state['current_turn_character_id']
+            combat_state_data = combat_state_doc.to_dict()
+            current_char_id = combat_state_data.get('current_turn_character_id')
+            
             if not current_char_id:
                 raise HTTPException(
                     status_code=400,
                     detail='No current turn set. Roll initiative first.'
                 )
             
-            # Get current turn order
-            current_turn = db.execute(
-                'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
-                (session_id, current_char_id)
-            ).fetchone()
+            # Get initiative order from Firestore
+            initiative_order_ref = session_ref.collection('initiative_order')
+            all_orders = list(initiative_order_ref.stream())
             
-            if not current_turn:
+            # Find current character's turn order
+            current_turn_order = None
+            for doc in all_orders:
+                data = doc.to_dict()
+                if str(data.get('character_id')) == str(current_char_id):
+                    current_turn_order = data.get('turn_order')
+                    break
+            
+            if current_turn_order is None:
                 raise HTTPException(
                     status_code=400,
                     detail='Current character not in initiative order'
                 )
             
-            # Get next character in order
-            next_char = db.execute(
-                '''SELECT character_id FROM initiative_order 
-                   WHERE session_id = ? AND turn_order > ?
-                   ORDER BY turn_order ASC LIMIT 1''',
-                (session_id, current_turn['turn_order'])
-            ).fetchone()
+            # Find next character in order
+            next_char_id = None
+            next_char_turn_order = None
+            for doc in all_orders:
+                data = doc.to_dict()
+                turn_order = data.get('turn_order', 0)
+                if turn_order > current_turn_order:
+                    if next_char_turn_order is None or turn_order < next_char_turn_order:
+                        next_char_id = data.get('character_id')
+                        next_char_turn_order = turn_order
             
-            if next_char:
+            if next_char_id:
                 # Move to next character
-                db.execute(
-                    'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
-                    (next_char['character_id'], session_id)
-                )
+                combat_state_ref.update({
+                    'current_turn_character_id': next_char_id,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
             else:
                 # Wrap around to first character and increment round
-                first_char = db.execute(
-                    '''SELECT character_id FROM initiative_order 
-                       WHERE session_id = ? 
-                       ORDER BY turn_order ASC LIMIT 1''',
-                    (session_id,)
+                first_char_id = None
+                first_turn_order = None
+                for doc in all_orders:
+                    data = doc.to_dict()
+                    turn_order = data.get('turn_order', 0)
+                    if first_turn_order is None or turn_order < first_turn_order:
+                        first_char_id = data.get('character_id')
+                        first_turn_order = turn_order
+                
+                if first_char_id:
+                    current_round = combat_state_data.get('current_round', 1)
+                    combat_state_ref.update({
+                        'current_turn_character_id': first_char_id,
+                        'current_round': current_round + 1,
+                        'updated_at': firestore.SERVER_TIMESTAMP
+                    })
+            
+            # Also try to update SQLite for legacy compatibility (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Get combat state
+                combat_state = db.execute(
+                    'SELECT * FROM combat_state WHERE session_id = ?',
+                    (session_id_int,)
                 ).fetchone()
                 
-                if first_char:
+                if not combat_state:
+                    return saved_event
+                
+                # Get current turn character
+                current_char_id_int = combat_state['current_turn_character_id']
+                if not current_char_id_int:
+                    return saved_event
+                
+                # Get current turn order
+                current_turn = db.execute(
+                    'SELECT turn_order FROM initiative_order WHERE session_id = ? AND character_id = ?',
+                    (session_id_int, current_char_id_int)
+                ).fetchone()
+                
+                if not current_turn:
+                    return saved_event
+                
+                # Get next character in order
+                next_char = db.execute(
+                    '''SELECT character_id FROM initiative_order 
+                       WHERE session_id = ? AND turn_order > ?
+                       ORDER BY turn_order ASC LIMIT 1''',
+                    (session_id_int, current_turn['turn_order'])
+                ).fetchone()
+                
+                if next_char:
                     db.execute(
-                        '''UPDATE combat_state 
-                           SET current_turn_character_id = ?, current_round = current_round + 1 
-                           WHERE session_id = ?''',
-                        (first_char['character_id'], session_id)
+                        'UPDATE combat_state SET current_turn_character_id = ? WHERE session_id = ?',
+                        (next_char['character_id'], session_id_int)
                     )
+                else:
+                    first_char = db.execute(
+                        '''SELECT character_id FROM initiative_order 
+                           WHERE session_id = ? 
+                           ORDER BY turn_order ASC LIMIT 1''',
+                        (session_id_int,)
+                    ).fetchone()
+                    
+                    if first_char:
+                        db.execute(
+                            '''UPDATE combat_state 
+                               SET current_turn_character_id = ?, current_round = current_round + 1 
+                               WHERE session_id = ?''',
+                            (first_char['character_id'], session_id_int)
+                        )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (Firestore is the source of truth)
+                pass
             
-            db.commit()
-            
-            # Get the created event
-            event_row = db.execute(
-                'SELECT * FROM combat_events WHERE id = ?',
-                (event_id,)
-            ).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except HTTPException:
             raise
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling turn advance event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -808,36 +962,36 @@ class RoundStartEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle round start: increment round and set to first character."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
+        """Handle round start: save to Firestore and update round counter in Firestore."""
         try:
-            # Get or create combat state
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id,)
-            ).fetchone()
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'round_start',
+                event_data
+            )
             
-            if not combat_state:
+            # Update combat state in Firestore
+            combat_state_ref = session_ref.collection('combat_state').document('current')
+            combat_state_doc = combat_state_ref.get()
+            
+            if not combat_state_doc.exists:
                 # Initialize combat state
-                db.execute(
-                    'INSERT INTO combat_state (session_id, current_round, is_active) VALUES (?, 1, 1)',
-                    (session_id,)
-                )
+                combat_state_ref.set({
+                    'is_active': True,
+                    'current_round': 1,
+                    'current_turn_character_id': None,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
                 current_round = 1
             else:
-                current_round = combat_state['current_round']
+                combat_state_data = combat_state_doc.to_dict()
+                current_round = combat_state_data.get('current_round', 1)
             
             # Determine new round number
             new_round = event_data.get('round_number')
@@ -845,53 +999,87 @@ class RoundStartEventType(EventType):
                 new_round = current_round + 1
             
             # Get first character in initiative order
-            first_char = db.execute(
-                '''SELECT character_id FROM initiative_order 
-                   WHERE session_id = ? 
-                   ORDER BY turn_order ASC LIMIT 1''',
-                (session_id,)
-            ).fetchone()
+            initiative_order_ref = session_ref.collection('initiative_order')
+            all_orders = list(initiative_order_ref.stream())
             
-            # Insert combat event
-            cursor = db.execute(
-                '''INSERT INTO combat_events 
-                   (session_id, event_type, round_number, transcript_segment)
-                   VALUES (?, ?, ?, ?)''',
-                (
-                    session_id,
-                    'round_start',
-                    new_round,
-                    event_data.get('transcript_segment')
-                )
-            )
-            event_id = cursor.lastrowid
+            first_char_id = None
+            first_turn_order = None
+            for doc in all_orders:
+                data = doc.to_dict()
+                turn_order = data.get('turn_order', 0)
+                if first_turn_order is None or turn_order < first_turn_order:
+                    first_char_id = data.get('character_id')
+                    first_turn_order = turn_order
             
             # Update combat state
-            if first_char:
-                db.execute(
-                    '''UPDATE combat_state 
-                       SET current_round = ?, current_turn_character_id = ? 
-                       WHERE session_id = ?''',
-                    (new_round, first_char['character_id'], session_id)
-                )
+            if first_char_id:
+                combat_state_ref.update({
+                    'current_round': new_round,
+                    'current_turn_character_id': first_char_id,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
             else:
-                db.execute(
-                    'UPDATE combat_state SET current_round = ? WHERE session_id = ?',
-                    (new_round, session_id)
-                )
+                combat_state_ref.update({
+                    'current_round': new_round,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
             
-            db.commit()
+            # Also try to update SQLite for legacy compatibility (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Get or create combat state
+                combat_state = db.execute(
+                    'SELECT * FROM combat_state WHERE session_id = ?',
+                    (session_id_int,)
+                ).fetchone()
+                
+                if not combat_state:
+                    db.execute(
+                        'INSERT INTO combat_state (session_id, current_round, is_active) VALUES (?, 1, 1)',
+                        (session_id_int,)
+                    )
+                    current_round = 1
+                else:
+                    current_round = combat_state['current_round']
+                
+                # Determine new round number
+                new_round = event_data.get('round_number')
+                if not new_round:
+                    new_round = current_round + 1
+                
+                # Get first character in initiative order
+                first_char = db.execute(
+                    '''SELECT character_id FROM initiative_order 
+                       WHERE session_id = ? 
+                       ORDER BY turn_order ASC LIMIT 1''',
+                    (session_id_int,)
+                ).fetchone()
+                
+                # Update combat state
+                if first_char:
+                    db.execute(
+                        '''UPDATE combat_state 
+                           SET current_round = ?, current_turn_character_id = ? 
+                           WHERE session_id = ?''',
+                        (new_round, first_char['character_id'], session_id_int)
+                    )
+                else:
+                    db.execute(
+                        'UPDATE combat_state SET current_round = ? WHERE session_id = ?',
+                        (new_round, session_id_int)
+                    )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (Firestore is the source of truth)
+                pass
             
-            # Get the created event
-            event_row = db.execute(
-                'SELECT * FROM combat_events WHERE id = ?',
-                (event_id,)
-            ).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling round start event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -987,12 +1175,12 @@ class StatusConditionAppliedEventType(EventType):
             if field == 'type' and event_data[field] != 'status_condition_applied':
                 logger.warning(f"Invalid type for status condition applied event: {event_data[field]}")
                 return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
             elif field == 'duration_minutes' and field in event_data:
                 if not isinstance(event_data[field], int):
                     try:
@@ -1009,33 +1197,53 @@ class StatusConditionAppliedEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle status condition applied: save event and add to active conditions."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        """Handle status condition applied: save to Firestore and add to active conditions in SQLite."""
+        character_id = str(event_data['character_id'])
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
+        
         try:
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'status_condition_applied',
+                event_data,
+                character_id,
+                character_name
+            )
+            
+            # Status conditions are still in SQLite, so convert session_id to int if possible
+            from ..db.database import get_database
+            db = get_database()
+            
+            try:
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+            except (ValueError, TypeError):
+                logger.warning(f"Cannot convert session_id {session_id} or character_id {character_id} to int for status condition management")
+                return saved_event
+            
             # Calculate expiration time if duration is provided
             expires_at = None
             duration_minutes = event_data.get('duration_minutes')
@@ -1043,30 +1251,14 @@ class StatusConditionAppliedEventType(EventType):
                 import datetime
                 expires_at = datetime.datetime.now() + datetime.timedelta(minutes=duration_minutes)
             
-            # Insert status condition event
-            cursor = db.execute(
-                '''INSERT INTO status_condition_events 
-                   (session_id, character_id, condition_name, action, duration_minutes, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['condition_name'],
-                    'applied',
-                    duration_minutes,
-                    event_data.get('transcript_segment')
-                )
-            )
-            event_id = cursor.lastrowid
-            
-            # Add to active status conditions (replace if already exists)
+            # Add to active status conditions in SQLite (replace if already exists)
             db.execute(
                 '''INSERT OR REPLACE INTO active_status_conditions 
                    (session_id, character_id, condition_name, applied_at, expires_at, duration_minutes)
                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?)''',
                 (
-                    session_id,
-                    event_data['character_id'],
+                    session_id_int,
+                    character_id_int,
                     event_data['condition_name'],
                     expires_at.strftime('%Y-%m-%d %H:%M:%S') if expires_at else None,
                     duration_minutes
@@ -1075,20 +1267,9 @@ class StatusConditionAppliedEventType(EventType):
             
             db.commit()
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    sce.*,
-                    c.name as character_name
-                FROM status_condition_events sce
-                JOIN characters c ON sce.character_id = c.id
-                WHERE sce.id = ?
-            ''', (event_id,)).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling status condition applied event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -1128,87 +1309,81 @@ class StatusConditionRemovedEventType(EventType):
             if field == 'type' and event_data[field] != 'status_condition_removed':
                 logger.warning(f"Invalid type for status condition removed event: {event_data[field]}")
                 return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
         
         return True
     
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle status condition removed: save event and remove from active conditions."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        """Handle status condition removed: save to Firestore and remove from active conditions in SQLite."""
+        character_id = str(event_data['character_id'])
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
+        
         try:
-            # Insert status condition event
-            cursor = db.execute(
-                '''INSERT INTO status_condition_events 
-                   (session_id, character_id, condition_name, action, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['condition_name'],
-                    'removed',
-                    event_data.get('transcript_segment')
-                )
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'status_condition_removed',
+                event_data,
+                character_id,
+                character_name
             )
-            event_id = cursor.lastrowid
             
-            # Remove from active status conditions
+            # Status conditions are still in SQLite, so convert session_id to int if possible
+            from ..db.database import get_database
+            db = get_database()
+            
+            try:
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+            except (ValueError, TypeError):
+                logger.warning(f"Cannot convert session_id {session_id} or character_id {character_id} to int for status condition management")
+                return saved_event
+            
+            # Remove from active status conditions in SQLite
             db.execute(
                 '''DELETE FROM active_status_conditions 
                    WHERE session_id = ? AND character_id = ? AND condition_name = ?''',
                 (
-                    session_id,
-                    event_data['character_id'],
+                    session_id_int,
+                    character_id_int,
                     event_data['condition_name']
                 )
             )
             
             db.commit()
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    sce.*,
-                    c.name as character_name
-                FROM status_condition_events sce
-                JOIN characters c ON sce.character_id = c.id
-                WHERE sce.id = ?
-            ''', (event_id,)).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling status condition removed event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -1243,75 +1418,84 @@ class CombatEndEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle combat end: deactivate combat state and clear current turn."""
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
-        
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
+        """Handle combat end: save to Firestore and deactivate combat state in Firestore."""
         try:
-            # Insert combat event
-            cursor = db.execute(
-                '''INSERT INTO combat_events 
-                   (session_id, event_type, transcript_segment)
-                   VALUES (?, ?, ?)''',
-                (
-                    session_id,
-                    'combat_end',
-                    event_data.get('transcript_segment')
-                )
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'combat_end',
+                event_data
             )
-            event_id = cursor.lastrowid
             
-            # Get or create combat state
-            combat_state = db.execute(
-                'SELECT * FROM combat_state WHERE session_id = ?',
-                (session_id,)
-            ).fetchone()
+            # Update combat state in Firestore
+            combat_state_ref = session_ref.collection('combat_state').document('current')
+            combat_state_doc = combat_state_ref.get()
             
-            if combat_state:
-                # Deactivate combat: set is_active to 0 and clear current turn
-                db.execute(
-                    '''UPDATE combat_state 
-                       SET is_active = 0, current_turn_character_id = NULL 
-                       WHERE session_id = ?''',
-                    (session_id,)
-                )
+            if combat_state_doc.exists:
+                # Deactivate combat: set is_active to False and clear current turn
+                combat_state_ref.update({
+                    'is_active': False,
+                    'current_turn_character_id': None,
+                    'updated_at': firestore.SERVER_TIMESTAMP
+                })
                 # Clear initiative order when combat ends
-                db.execute(
-                    'DELETE FROM initiative_order WHERE session_id = ?',
-                    (session_id,)
-                )
+                initiative_order_ref = session_ref.collection('initiative_order')
+                for doc in initiative_order_ref.stream():
+                    doc.reference.delete()
                 logger.info(f"Combat ended for session {session_id}. Combat state deactivated and initiative order cleared.")
             else:
                 # No combat state exists, that's fine - combat wasn't active
                 # But still clear any leftover initiative order
-                db.execute(
-                    'DELETE FROM initiative_order WHERE session_id = ?',
-                    (session_id,)
-                )
+                initiative_order_ref = session_ref.collection('initiative_order')
+                for doc in initiative_order_ref.stream():
+                    doc.reference.delete()
                 logger.info(f"Combat end event for session {session_id}, but no active combat state found. Initiative order cleared.")
             
-            db.commit()
+            # Also try to update SQLite for legacy compatibility (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Get or create combat state
+                combat_state = db.execute(
+                    'SELECT * FROM combat_state WHERE session_id = ?',
+                    (session_id_int,)
+                ).fetchone()
+                
+                if combat_state:
+                    # Deactivate combat: set is_active to 0 and clear current turn
+                    db.execute(
+                        '''UPDATE combat_state 
+                           SET is_active = 0, current_turn_character_id = NULL 
+                           WHERE session_id = ?''',
+                        (session_id_int,)
+                    )
+                    # Clear initiative order when combat ends
+                    db.execute(
+                        'DELETE FROM initiative_order WHERE session_id = ?',
+                        (session_id_int,)
+                    )
+                else:
+                    # No combat state exists, but still clear any leftover initiative order
+                    db.execute(
+                        'DELETE FROM initiative_order WHERE session_id = ?',
+                        (session_id_int,)
+                    )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (Firestore is the source of truth)
+                pass
             
-            # Get the created event
-            event_row = db.execute(
-                'SELECT * FROM combat_events WHERE id = ?',
-                (event_id,)
-            ).fetchone()
-            
-            return dict(event_row)
+            return saved_event
             
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling combat end event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -1372,12 +1556,12 @@ class BuffDebuffAppliedEventType(EventType):
                 if event_data[field] not in ['none', 'stack', 'replace', 'highest']:
                     logger.warning(f"Invalid stacking_rule: {event_data[field]}")
                     return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
             elif field == 'duration_minutes' and field in event_data:
                 if not isinstance(event_data[field], int):
                     try:
@@ -1394,102 +1578,80 @@ class BuffDebuffAppliedEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle buff/debuff applied: save event and add to active effects with stacking logic."""
-        import json
-        import datetime
+        """Handle buff/debuff applied: save event to Firestore and add to active effects in SQLite."""
+        character_id = str(event_data['character_id'])
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
+        
         try:
-            # Calculate expiration time if duration is provided
-            expires_at = None
-            duration_minutes = event_data.get('duration_minutes')
-            if duration_minutes and duration_minutes > 0:
-                expires_at = datetime.datetime.now() + datetime.timedelta(minutes=duration_minutes)
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'buff_debuff_applied',
+                event_data,
+                character_id,
+                character_name
+            )
             
-            # Get stacking rule (default: 'replace')
-            stacking_rule = event_data.get('stacking_rule', 'replace')
-            
-            # Check if effect already exists
-            existing_effect = db.execute(
-                '''SELECT * FROM active_buff_debuffs 
-                   WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
-                (session_id, event_data['character_id'], event_data['effect_name'])
-            ).fetchone()
-            
-            # Apply stacking rules
-            if existing_effect:
-                if stacking_rule == 'none':
-                    # Don't apply if already exists
-                    logger.info(f"Effect {event_data['effect_name']} already exists with stacking_rule='none', skipping")
-                    # Still create event for history
-                    cursor = db.execute(
-                        '''INSERT INTO buff_debuff_events 
-                           (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, duration_minutes, transcript_segment)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                        (
-                            session_id,
-                            event_data['character_id'],
-                            event_data['effect_name'],
-                            event_data['effect_type'],
-                            'applied',
-                            json.dumps(event_data['stat_modifications']),
-                            stacking_rule,
-                            duration_minutes,
-                            event_data.get('transcript_segment')
-                        )
-                    )
-                    db.commit()
-                    return dict(db.execute('SELECT * FROM buff_debuff_events WHERE id = ?', (cursor.lastrowid,)).fetchone())
-                elif stacking_rule == 'replace':
-                    # Replace existing effect
-                    pass  # Will update below
-                elif stacking_rule == 'highest':
-                    # Only replace if new effect has higher values
-                    existing_mods = json.loads(existing_effect['stat_modifications'])
-                    new_mods = event_data['stat_modifications']
-                    should_replace = False
-                    for stat, value in new_mods.items():
-                        if stat in existing_mods:
-                            # Compare absolute values for highest
-                            if abs(value) > abs(existing_mods[stat]):
-                                should_replace = True
-                                break
-                        else:
-                            should_replace = True
-                            break
-                    if not should_replace:
-                        logger.info(f"Existing effect {event_data['effect_name']} has higher values, keeping existing")
+            # Also try to update SQLite for active effects tracking (if session_id can be converted)
+            try:
+                import json
+                import datetime
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Calculate expiration time if duration is provided
+                expires_at = None
+                duration_minutes = event_data.get('duration_minutes')
+                if duration_minutes and duration_minutes > 0:
+                    expires_at = datetime.datetime.now() + datetime.timedelta(minutes=duration_minutes)
+                
+                # Get stacking rule (default: 'replace')
+                stacking_rule = event_data.get('stacking_rule', 'replace')
+                
+                # Check if effect already exists
+                existing_effect = db.execute(
+                    '''SELECT * FROM active_buff_debuffs 
+                       WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                    (session_id_int, character_id_int, event_data['effect_name'])
+                ).fetchone()
+                
+                # Apply stacking rules
+                if existing_effect:
+                    if stacking_rule == 'none':
+                        # Don't apply if already exists
+                        logger.info(f"Effect {event_data['effect_name']} already exists with stacking_rule='none', skipping")
+                        # Still create event for history
                         cursor = db.execute(
                             '''INSERT INTO buff_debuff_events 
                                (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, duration_minutes, transcript_segment)
                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                             (
-                                session_id,
-                                event_data['character_id'],
+                                session_id_int,
+                                character_id_int,
                                 event_data['effect_name'],
                                 event_data['effect_type'],
                                 'applied',
@@ -1500,79 +1662,107 @@ class BuffDebuffAppliedEventType(EventType):
                             )
                         )
                         db.commit()
-                        return dict(db.execute('SELECT * FROM buff_debuff_events WHERE id = ?', (cursor.lastrowid,)).fetchone())
-                elif stacking_rule == 'stack':
-                    # Stack effects - combine stat modifications
-                    existing_mods = json.loads(existing_effect['stat_modifications'])
-                    new_mods = event_data['stat_modifications']
-                    combined_mods = existing_mods.copy()
-                    for stat, value in new_mods.items():
-                        if stat in combined_mods:
-                            combined_mods[stat] = combined_mods[stat] + value
-                        else:
-                            combined_mods[stat] = value
-                    event_data['stat_modifications'] = combined_mods
-                    # Update expiration to the later of the two
-                    existing_expires = existing_effect['expires_at']
-                    if existing_expires and expires_at:
-                        expires_at_str = existing_expires if isinstance(existing_expires, str) else existing_expires.strftime('%Y-%m-%d %H:%M:%S')
-                        new_expires_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
-                        if existing_expires > expires_at:
-                            expires_at = datetime.datetime.strptime(expires_at_str, '%Y-%m-%d %H:%M:%S') if isinstance(existing_expires, str) else existing_expires
-            
-            # Insert buff/debuff event
-            cursor = db.execute(
-                '''INSERT INTO buff_debuff_events 
-                   (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, duration_minutes, transcript_segment)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['effect_name'],
-                    event_data['effect_type'],
-                    'applied',
-                    json.dumps(event_data['stat_modifications']),
-                    stacking_rule,
-                    duration_minutes,
-                    event_data.get('transcript_segment')
+                    elif stacking_rule == 'replace':
+                        # Replace existing effect
+                        pass  # Will update below
+                    elif stacking_rule == 'highest':
+                        # Only replace if new effect has higher values
+                        existing_mods = json.loads(existing_effect['stat_modifications'])
+                        new_mods = event_data['stat_modifications']
+                        should_replace = False
+                        for stat, value in new_mods.items():
+                            if stat in existing_mods:
+                                # Compare absolute values for highest
+                                if abs(value) > abs(existing_mods[stat]):
+                                    should_replace = True
+                                    break
+                            else:
+                                should_replace = True
+                                break
+                        if not should_replace:
+                            logger.info(f"Existing effect {event_data['effect_name']} has higher values, keeping existing")
+                            cursor = db.execute(
+                                '''INSERT INTO buff_debuff_events 
+                                   (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, duration_minutes, transcript_segment)
+                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                (
+                                    session_id_int,
+                                    character_id_int,
+                                    event_data['effect_name'],
+                                    event_data['effect_type'],
+                                    'applied',
+                                    json.dumps(event_data['stat_modifications']),
+                                    stacking_rule,
+                                    duration_minutes,
+                                    event_data.get('transcript_segment')
+                                )
+                            )
+                            db.commit()
+                    elif stacking_rule == 'stack':
+                        # Stack effects - combine stat modifications
+                        existing_mods = json.loads(existing_effect['stat_modifications'])
+                        new_mods = event_data['stat_modifications']
+                        combined_mods = existing_mods.copy()
+                        for stat, value in new_mods.items():
+                            if stat in combined_mods:
+                                combined_mods[stat] = combined_mods[stat] + value
+                            else:
+                                combined_mods[stat] = value
+                        event_data['stat_modifications'] = combined_mods
+                        # Update expiration to the later of the two
+                        existing_expires = existing_effect['expires_at']
+                        if existing_expires and expires_at:
+                            expires_at_str = existing_expires if isinstance(existing_expires, str) else existing_expires.strftime('%Y-%m-%d %H:%M:%S')
+                            new_expires_str = expires_at.strftime('%Y-%m-%d %H:%M:%S')
+                            if existing_expires > expires_at:
+                                expires_at = datetime.datetime.strptime(expires_at_str, '%Y-%m-%d %H:%M:%S') if isinstance(existing_expires, str) else existing_expires
+                
+                # Insert buff/debuff event
+                cursor = db.execute(
+                    '''INSERT INTO buff_debuff_events 
+                       (session_id, character_id, effect_name, effect_type, action, stat_modifications, stacking_rule, duration_minutes, transcript_segment)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (
+                        session_id_int,
+                        character_id_int,
+                        event_data['effect_name'],
+                        event_data['effect_type'],
+                        'applied',
+                        json.dumps(event_data['stat_modifications']),
+                        stacking_rule,
+                        duration_minutes,
+                        event_data.get('transcript_segment')
+                    )
                 )
-            )
-            event_id = cursor.lastrowid
-            
-            # Add or update active buff/debuff
-            db.execute(
-                '''INSERT OR REPLACE INTO active_buff_debuffs 
-                   (session_id, character_id, effect_name, effect_type, stat_modifications, stacking_rule, applied_at, expires_at, duration_minutes, source)
-                   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['effect_name'],
-                    event_data['effect_type'],
-                    json.dumps(event_data['stat_modifications']),
-                    stacking_rule,
-                    expires_at.strftime('%Y-%m-%d %H:%M:%S') if expires_at else None,
-                    duration_minutes,
-                    event_data.get('source')
+                
+                # Add or update active buff/debuff
+                db.execute(
+                    '''INSERT OR REPLACE INTO active_buff_debuffs 
+                       (session_id, character_id, effect_name, effect_type, stat_modifications, stacking_rule, applied_at, expires_at, duration_minutes, source)
+                       VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)''',
+                    (
+                        session_id_int,
+                        character_id_int,
+                        event_data['effect_name'],
+                        event_data['effect_type'],
+                        json.dumps(event_data['stat_modifications']),
+                        stacking_rule,
+                        expires_at.strftime('%Y-%m-%d %H:%M:%S') if expires_at else None,
+                        duration_minutes,
+                        event_data.get('source')
+                    )
                 )
-            )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (active effects tracking unavailable)
+                pass
             
-            db.commit()
+            return saved_event
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    bde.*,
-                    c.name as character_name
-                FROM buff_debuff_events bde
-                JOIN characters c ON bde.character_id = c.id
-                WHERE bde.id = ?
-            ''', (event_id,)).fetchone()
-            
-            return dict(event_row)
-            
+        except HTTPException:
+            raise
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling buff/debuff applied event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -1613,95 +1803,102 @@ class BuffDebuffRemovedEventType(EventType):
             if field == 'type' and event_data[field] != 'buff_debuff_removed':
                 logger.warning(f"Invalid type for buff/debuff removed event: {event_data[field]}")
                 return False
-            elif field == 'character_id' and not isinstance(event_data[field], int):
-                try:
-                    event_data[field] = int(event_data[field])
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid character_id type: {event_data[field]}")
+            elif field == 'character_id':
+                # Accept both int and str (Firestore uses strings, SQLite uses ints)
+                if not isinstance(event_data[field], (int, str)):
+                    logger.warning(f"Invalid character_id type: {type(event_data[field])}, value: {event_data[field]}")
                     return False
+                # Keep as-is (string for Firestore, int for SQLite compatibility)
         
         return True
     
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Handle buff/debuff removed: save event and remove from active effects."""
-        import json
+        """Handle buff/debuff removed: save event to Firestore and remove from active effects in SQLite."""
+        character_id = str(event_data['character_id'])
         
-        # Verify session belongs to user
-        session = db.execute(
-            'SELECT * FROM sessions WHERE id = ? AND user_id = ?',
-            (session_id, user_id)
-        ).fetchone()
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
         
-        if not session:
-            raise HTTPException(status_code=404, detail='Session not found')
-        
-        # Verify character is in the session
-        session_character = db.execute(
-            'SELECT * FROM session_characters WHERE session_id = ? AND character_id = ?',
-            (session_id, event_data['character_id'])
-        ).fetchone()
-        
-        if not session_character:
+        if not session_character_doc.exists:
             raise HTTPException(
                 status_code=400,
                 detail='Character is not in this session'
             )
         
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
+        
         try:
-            # Insert buff/debuff event
-            cursor = db.execute(
-                '''INSERT INTO buff_debuff_events 
-                   (session_id, character_id, effect_name, effect_type, action, transcript_segment)
-                   VALUES (?, ?, ?, 
-                       (SELECT effect_type FROM active_buff_debuffs 
-                        WHERE session_id = ? AND character_id = ? AND effect_name = ? LIMIT 1),
-                       ?, ?)''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['effect_name'],
-                    session_id,
-                    event_data['character_id'],
-                    event_data['effect_name'],
-                    'removed',
-                    event_data.get('transcript_segment')
-                )
-            )
-            event_id = cursor.lastrowid
-            
-            # Remove from active buffs/debuffs
-            db.execute(
-                '''DELETE FROM active_buff_debuffs 
-                   WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
-                (
-                    session_id,
-                    event_data['character_id'],
-                    event_data['effect_name']
-                )
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'buff_debuff_removed',
+                event_data,
+                character_id,
+                character_name
             )
             
-            db.commit()
+            # Also try to update SQLite for active effects tracking (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Insert buff/debuff event
+                cursor = db.execute(
+                    '''INSERT INTO buff_debuff_events 
+                       (session_id, character_id, effect_name, effect_type, action, transcript_segment)
+                       VALUES (?, ?, ?, 
+                           (SELECT effect_type FROM active_buff_debuffs 
+                            WHERE session_id = ? AND character_id = ? AND effect_name = ? LIMIT 1),
+                           ?, ?)''',
+                    (
+                        session_id_int,
+                        character_id_int,
+                        event_data['effect_name'],
+                        session_id_int,
+                        character_id_int,
+                        event_data['effect_name'],
+                        'removed',
+                        event_data.get('transcript_segment')
+                    )
+                )
+                
+                # Remove from active buffs/debuffs
+                db.execute(
+                    '''DELETE FROM active_buff_debuffs 
+                       WHERE session_id = ? AND character_id = ? AND effect_name = ?''',
+                    (
+                        session_id_int,
+                        character_id_int,
+                        event_data['effect_name']
+                    )
+                )
+                
+                db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (active effects tracking unavailable)
+                pass
             
-            # Get the created event with character name
-            event_row = db.execute('''
-                SELECT 
-                    bde.*,
-                    c.name as character_name
-                FROM buff_debuff_events bde
-                JOIN characters c ON bde.character_id = c.id
-                WHERE bde.id = ?
-            ''', (event_id,)).fetchone()
+            return saved_event
             
-            return dict(event_row)
-            
+        except HTTPException:
+            raise
         except Exception as e:
-            db.rollback()
             logger.error(f"Error handling buff/debuff removed event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
@@ -1742,7 +1939,8 @@ class SpellCastEventType(EventType):
         if not all(field in event_data for field in required_fields):
             return False
         
-        if not isinstance(event_data['character_id'], int):
+        # Accept both int and str (Firestore uses strings, SQLite uses ints)
+        if not isinstance(event_data['character_id'], (int, str)):
             return False
         
         if not isinstance(event_data['spell_name'], str) or not event_data['spell_name'].strip():
@@ -1757,96 +1955,72 @@ class SpellCastEventType(EventType):
     async def handle_event(
         self,
         event_data: Dict[str, Any],
-        session_id: int,
-        user_id: int,
-        db: Any
+        session_id: str,
+        user_id: str,
+        db_firestore: Any,
+        session_ref: Any
     ) -> Dict[str, Any]:
-        """Process spell cast event: save event and update spell slot usage."""
-        logger.info(f"SpellCastEventType.handle_event called - session_id: {session_id}, user_id: {user_id}")
-        logger.debug(f"Event data: {event_data}")
+        """Process spell cast event: save event to Firestore and update spell slot usage in SQLite."""
+        character_id = str(event_data.get('character_id'))
+        spell_level = event_data.get('spell_level')
+        spell_name = event_data.get('spell_name')
+        
+        # Verify character is in the session (from Firestore)
+        session_character_ref = session_ref.collection('session_characters').document(character_id)
+        session_character_doc = session_character_ref.get()
+        
+        if not session_character_doc.exists:
+            raise HTTPException(
+                status_code=400,
+                detail='Character is not in this session'
+            )
+        
+        # Get character name
+        character_ref = db_firestore.collection('users').document(user_id).collection('characters').document(character_id)
+        character_doc = character_ref.get()
+        character_name = event_data.get('character_name', 'Unknown')
+        if character_doc.exists:
+            char_data = character_doc.to_dict()
+            character_name = char_data.get('name', character_name)
         
         try:
-            character_id = event_data.get('character_id')
-            spell_level = event_data.get('spell_level')
-            spell_name = event_data.get('spell_name')
-            
-            logger.info(f"Processing spell cast: {spell_name} (level {spell_level}) for character {character_id}")
-            
-            # Verify character belongs to user's session
-            character_check = db.execute('''
-                SELECT sc.character_id
-                FROM session_characters sc
-                JOIN sessions s ON sc.session_id = s.id
-                WHERE sc.session_id = ? AND sc.character_id = ? AND s.user_id = ?
-            ''', (session_id, character_id, user_id)).fetchone()
-            
-            if not character_check:
-                logger.warning(f"Character {character_id} not found in session {session_id} for user {user_id}")
-                raise HTTPException(status_code=404, detail='Character not found in session')
-            
-            logger.debug(f"Character {character_id} verified in session {session_id}")
-            
-            # Save spell event - use 'cast' to match CHECK constraint
-            logger.debug(f"Inserting spell event into database: spell_name={spell_name}, spell_level={spell_level}, event_type='cast'")
-            event_id = db.execute('''
-                INSERT INTO spell_events (
-                    session_id, character_id, spell_name, spell_level, event_type, transcript_segment
-                ) VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                session_id,
+            # Save event to Firestore
+            saved_event = save_event_to_firestore(
+                session_ref,
+                'spell_cast',
+                event_data,
                 character_id,
-                spell_name,
-                spell_level,
-                'cast',
-                event_data.get('transcript_segment', '')
-            )).lastrowid
-            logger.debug(f"Spell event inserted with ID: {event_id}")
-            
-            # Update spell slot usage (only for level 1-9, cantrips don't use slots)
-            if spell_level > 0:
-                logger.debug(f"Updating spell slot usage for character {character_id}, spell level {spell_level}")
-                # Insert or update spell slot usage
-                db.execute('''
-                    INSERT INTO character_spell_slots (
-                        session_id, character_id, spell_level, slots_used
-                    ) VALUES (?, ?, ?, 1)
-                    ON CONFLICT(session_id, character_id, spell_level) 
-                    DO UPDATE SET slots_used = slots_used + 1
-                ''', (session_id, character_id, spell_level))
-            else:
-                logger.debug(f"Spell level is {spell_level} (cantrip), skipping spell slot usage update")
-            
-            logger.debug(f"Committing transaction for spell event {event_id}")
-            db.commit()
-            
-            # Get the created event with character name
-            logger.debug(f"Fetching created spell event with ID {event_id}")
-            event_row = db.execute('''
-                SELECT 
-                    se.*,
-                    c.name as character_name
-                FROM spell_events se
-                JOIN characters c ON se.character_id = c.id
-                WHERE se.id = ?
-            ''', (event_id,)).fetchone()
-            
-            logger.info(
-                f"✓ Spell cast event processed successfully: {spell_name} (level {spell_level}) by character {character_id} "
-                f"in session {session_id}"
+                character_name
             )
             
-            return dict(event_row)
+            # Also try to update SQLite for spell slot tracking (if session_id can be converted)
+            try:
+                session_id_int = int(session_id)
+                character_id_int = int(character_id)
+                from ..db.database import get_database
+                db = get_database()
+                
+                # Update spell slot usage (only for level 1-9, cantrips don't use slots)
+                if spell_level > 0:
+                    # Insert or update spell slot usage
+                    db.execute('''
+                        INSERT INTO character_spell_slots (
+                            session_id, character_id, spell_level, slots_used
+                        ) VALUES (?, ?, ?, 1)
+                        ON CONFLICT(session_id, character_id, spell_level) 
+                        DO UPDATE SET slots_used = slots_used + 1
+                    ''', (session_id_int, character_id_int, spell_level))
+                    db.commit()
+            except (ValueError, TypeError):
+                # Can't convert to int, skip SQLite update (spell slots tracking unavailable)
+                pass
+            
+            return saved_event
             
         except HTTPException:
-            logger.debug("HTTPException raised, re-raising")
             raise
         except Exception as e:
-            logger.error(f"❌ Error handling spell cast event: {e}")
-            logger.error(f"   Event data: {event_data}")
-            logger.error(f"   Session ID: {session_id}, User ID: {user_id}")
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
-            db.rollback()
+            logger.error(f"Error handling spell cast event: {e}")
             raise HTTPException(status_code=500, detail='Internal server error')
 
 

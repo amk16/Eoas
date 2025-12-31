@@ -11,7 +11,7 @@ type CharacterDraft = {
   name: string;
   max_hp: number;
   // optional links
-  campaign_id: number | null;
+  campaign_id: string | null;
   // optional combat + flavor
   race: string;
   class_name: string;
@@ -22,12 +22,29 @@ type CharacterDraft = {
   background: string;
   alignment: string;
   notes: string;
+  // Stats (optional)
+  strength_base: number | null;
+  strength_bonus: number | null;
+  dexterity_base: number | null;
+  dexterity_bonus: number | null;
+  wisdom_base: number | null;
+  wisdom_bonus: number | null;
+  intelligence_base: number | null;
+  intelligence_bonus: number | null;
+  constitution_base: number | null;
+  constitution_bonus: number | null;
+  charisma_base: number | null;
+  charisma_bonus: number | null;
+  // Flavour (optional)
+  style: string;
+  clothing: string;
+  expression: string;
 };
 
 const steps: StepperStep[] = [
   { id: 'basics', title: 'Basics', description: 'Name, campaign, race' },
   { id: 'combat', title: 'Combat', description: 'HP, AC, initiative' },
-  { id: 'flavor', title: 'Flavor', description: 'Optional details' },
+  { id: 'flavor', title: 'Flavor', description: 'Artistic details' },
   { id: 'review', title: 'Review', description: 'Confirm & save' },
 ];
 
@@ -44,14 +61,23 @@ const defaultDraft = (preset?: Partial<CharacterDraft>): CharacterDraft => ({
   background: '',
   alignment: '',
   notes: '',
+  strength_base: null,
+  strength_bonus: null,
+  dexterity_base: null,
+  dexterity_bonus: null,
+  wisdom_base: null,
+  wisdom_bonus: null,
+  intelligence_base: null,
+  intelligence_bonus: null,
+  constitution_base: null,
+  constitution_bonus: null,
+  charisma_base: null,
+  charisma_bonus: null,
+  style: '',
+  clothing: '',
+  expression: '',
   ...preset,
 });
-
-function parseIntOrNull(v: string | null): number | null {
-  if (!v) return null;
-  const n = parseInt(v, 10);
-  return Number.isFinite(n) ? n : null;
-}
 
 export default function CharacterWizardDrawer({
   open,
@@ -63,8 +89,8 @@ export default function CharacterWizardDrawer({
 }: {
   open: boolean;
   mode: Mode;
-  characterId?: number | null;
-  presetCampaignId?: number | null;
+  characterId?: string | null;
+  presetCampaignId?: string | null;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -73,6 +99,7 @@ export default function CharacterWizardDrawer({
   const [loading, setLoading] = useState(false);
   const [loadingCharacter, setLoadingCharacter] = useState(false);
   const [error, setError] = useState('');
+  const [extraOptionsExpanded, setExtraOptionsExpanded] = useState(false);
 
   const [draft, setDraft] = useState<CharacterDraft>(() =>
     defaultDraft({ campaign_id: presetCampaignId ?? null })
@@ -100,6 +127,7 @@ export default function CharacterWizardDrawer({
     if (!open) return;
     setError('');
     setActiveStep(0);
+    setExtraOptionsExpanded(false);
   }, [open]);
 
   useEffect(() => {
@@ -141,6 +169,21 @@ export default function CharacterWizardDrawer({
             background: (c as any).background ?? '',
             alignment: (c as any).alignment ?? '',
             notes: (c as any).notes ?? '',
+            strength_base: (c as any).strength_base ?? null,
+            strength_bonus: (c as any).strength_bonus ?? null,
+            dexterity_base: (c as any).dexterity_base ?? null,
+            dexterity_bonus: (c as any).dexterity_bonus ?? null,
+            wisdom_base: (c as any).wisdom_base ?? null,
+            wisdom_bonus: (c as any).wisdom_bonus ?? null,
+            intelligence_base: (c as any).intelligence_base ?? null,
+            intelligence_bonus: (c as any).intelligence_bonus ?? null,
+            constitution_base: (c as any).constitution_base ?? null,
+            constitution_bonus: (c as any).constitution_bonus ?? null,
+            charisma_base: (c as any).charisma_base ?? null,
+            charisma_bonus: (c as any).charisma_bonus ?? null,
+            style: (c as any).style ?? '',
+            clothing: (c as any).clothing ?? '',
+            expression: (c as any).expression ?? '',
           })
         );
       })
@@ -167,6 +210,21 @@ export default function CharacterWizardDrawer({
         background: draft.background.trim() || null,
         alignment: draft.alignment.trim() || null,
         notes: draft.notes.trim() || null,
+        strength_base: draft.strength_base,
+        strength_bonus: draft.strength_bonus,
+        dexterity_base: draft.dexterity_base,
+        dexterity_bonus: draft.dexterity_bonus,
+        wisdom_base: draft.wisdom_base,
+        wisdom_bonus: draft.wisdom_bonus,
+        intelligence_base: draft.intelligence_base,
+        intelligence_bonus: draft.intelligence_bonus,
+        constitution_base: draft.constitution_base,
+        constitution_bonus: draft.constitution_bonus,
+        charisma_base: draft.charisma_base,
+        charisma_bonus: draft.charisma_bonus,
+        style: draft.style.trim() || null,
+        clothing: draft.clothing.trim() || null,
+        expression: draft.expression.trim() || null,
       };
 
       if (mode === 'edit' && characterId) {
@@ -203,8 +261,8 @@ export default function CharacterWizardDrawer({
             type="button"
             onClick={() => setActiveStep((s) => Math.min(steps.length - 1, s + 1))}
             className="px-4 py-2 bg-white text-black rounded-xl hover:bg-neutral-200 transition-colors text-sm font-medium disabled:opacity-50"
-            disabled={loading || (activeStep === steps.length - 2 && !validation.ok)}
-            title={activeStep === steps.length - 2 && !validation.ok ? 'Fix required fields before review' : undefined}
+            disabled={loading || !validation.ok}
+            title={!validation.ok ? 'Fix required fields to continue' : undefined}
           >
             Next
           </button>
@@ -240,13 +298,14 @@ export default function CharacterWizardDrawer({
             {activeStep === 0 && (
               <div className="space-y-4">
                 <div>
-                  <label className="block text-sm font-medium text-white/80 mb-2">Character Name</label>
+                  <label className="block text-sm font-medium text-white/80 mb-2">Character Name *</label>
                   <input
                     value={draft.name}
                     onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
                     placeholder="e.g., Kethra Stormshield"
                     autoFocus
+                    required
                   />
                 </div>
 
@@ -255,7 +314,7 @@ export default function CharacterWizardDrawer({
                   <select
                     value={draft.campaign_id ?? ''}
                     onChange={(e) =>
-                      setDraft((d) => ({ ...d, campaign_id: parseIntOrNull(e.target.value) }))
+                      setDraft((d) => ({ ...d, campaign_id: e.target.value || null }))
                     }
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
                   >
@@ -277,6 +336,16 @@ export default function CharacterWizardDrawer({
                     placeholder="e.g., Half-Elf"
                   />
                 </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-white/80 mb-2">Class (Optional)</label>
+                  <input
+                    value={draft.class_name}
+                    onChange={(e) => setDraft((d) => ({ ...d, class_name: e.target.value }))}
+                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
+                    placeholder="e.g., Paladin"
+                  />
+                </div>
               </div>
             )}
 
@@ -284,7 +353,7 @@ export default function CharacterWizardDrawer({
               <div className="space-y-4">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-sm font-medium text-white/80 mb-2">Max HP</label>
+                    <label className="block text-sm font-medium text-white/80 mb-2">Max HP *</label>
                     <input
                       type="number"
                       min={1}
@@ -293,6 +362,7 @@ export default function CharacterWizardDrawer({
                         setDraft((d) => ({ ...d, max_hp: parseInt(e.target.value, 10) || 0 }))
                       }
                       className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                      required
                     />
                   </div>
                   <div>
@@ -364,13 +434,213 @@ export default function CharacterWizardDrawer({
                 </div>
 
                 <div>
-                  <label className="block text-sm font-medium text-white/80 mb-2">Class (Optional)</label>
-                  <input
-                    value={draft.class_name}
-                    onChange={(e) => setDraft((d) => ({ ...d, class_name: e.target.value }))}
-                    className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
-                    placeholder="e.g., Paladin"
-                  />
+                  <label className="block text-sm font-medium text-white/80 mb-3">Ability Scores (Optional)</label>
+                  <div className="space-y-3">
+                    {/* Strength */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Strength</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.strength_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              strength_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.strength_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              strength_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                    {/* Dexterity */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Dexterity</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.dexterity_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              dexterity_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.dexterity_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              dexterity_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                    {/* Wisdom */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Wisdom</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.wisdom_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              wisdom_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.wisdom_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              wisdom_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                    {/* Intelligence */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Intelligence</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.intelligence_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              intelligence_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.intelligence_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              intelligence_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                    {/* Constitution */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Constitution</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.constitution_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              constitution_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.constitution_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              constitution_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                    {/* Charisma */}
+                    <div className="grid grid-cols-3 gap-3 items-end">
+                      <div className="text-sm text-neutral-400">Charisma</div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Base</label>
+                        <input
+                          type="number"
+                          value={draft.charisma_base ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              charisma_base: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-neutral-500 mb-1">Bonus</label>
+                        <input
+                          type="number"
+                          value={draft.charisma_bonus ?? ''}
+                          onChange={(e) =>
+                            setDraft((d) => ({
+                              ...d,
+                              charisma_bonus: e.target.value === '' ? null : parseInt(e.target.value, 10) || 0,
+                            }))
+                          }
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20"
+                          placeholder="—"
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
@@ -407,6 +677,55 @@ export default function CharacterWizardDrawer({
                     className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
                     placeholder="Personality, bonds, features, custom rules, etc."
                   />
+                </div>
+
+                <div className="border border-neutral-800 rounded-xl overflow-hidden">
+                  <button
+                    type="button"
+                    onClick={() => setExtraOptionsExpanded(!extraOptionsExpanded)}
+                    className="w-full px-4 py-3 flex items-center justify-between text-left hover:bg-white/5 transition-colors"
+                  >
+                    <span className="text-sm font-medium text-white/80">Extra Options</span>
+                    <svg
+                      className={`w-4 h-4 text-neutral-400 transition-transform ${extraOptionsExpanded ? 'rotate-180' : ''}`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </button>
+                  {extraOptionsExpanded && (
+                    <div className="px-4 pb-4 space-y-4 border-t border-neutral-800">
+                      <div>
+                        <label className="block text-sm font-medium text-white/80 mb-2">Style (Optional)</label>
+                        <input
+                          value={draft.style}
+                          onChange={(e) => setDraft((d) => ({ ...d, style: e.target.value }))}
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
+                          placeholder="e.g., Elegant, Rough, Mystical"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-white/80 mb-2">Clothing (Optional)</label>
+                        <input
+                          value={draft.clothing}
+                          onChange={(e) => setDraft((d) => ({ ...d, clothing: e.target.value }))}
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
+                          placeholder="e.g., Robes, Armor, Traveler's clothes"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-white/80 mb-2">Expression (Optional)</label>
+                        <input
+                          value={draft.expression}
+                          onChange={(e) => setDraft((d) => ({ ...d, expression: e.target.value }))}
+                          className="w-full px-3 py-2 bg-neutral-950 border border-neutral-800 text-white rounded-xl focus:outline-none focus:ring-1 focus:ring-white/10 focus:border-white/20 placeholder:text-neutral-500"
+                          placeholder="e.g., Stern, Friendly, Mysterious"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -480,6 +799,88 @@ export default function CharacterWizardDrawer({
                       <div className="text-white text-sm whitespace-pre-wrap mt-1">{draft.notes}</div>
                     </div>
                   )}
+
+                  {(() => {
+                    const hasAnyStats =
+                      draft.strength_base !== null ||
+                      draft.strength_bonus !== null ||
+                      draft.dexterity_base !== null ||
+                      draft.dexterity_bonus !== null ||
+                      draft.wisdom_base !== null ||
+                      draft.wisdom_bonus !== null ||
+                      draft.intelligence_base !== null ||
+                      draft.intelligence_bonus !== null ||
+                      draft.constitution_base !== null ||
+                      draft.constitution_bonus !== null ||
+                      draft.charisma_base !== null ||
+                      draft.charisma_bonus !== null;
+
+                    if (!hasAnyStats) return null;
+
+                    return (
+                      <div className="mt-4 border-t border-neutral-800 pt-4">
+                        <div className="text-neutral-400 text-sm font-semibold mb-3">Ability Scores</div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                          {[
+                            { name: 'Strength', base: draft.strength_base, bonus: draft.strength_bonus },
+                            { name: 'Dexterity', base: draft.dexterity_base, bonus: draft.dexterity_bonus },
+                            { name: 'Wisdom', base: draft.wisdom_base, bonus: draft.wisdom_bonus },
+                            { name: 'Intelligence', base: draft.intelligence_base, bonus: draft.intelligence_bonus },
+                            { name: 'Constitution', base: draft.constitution_base, bonus: draft.constitution_bonus },
+                            { name: 'Charisma', base: draft.charisma_base, bonus: draft.charisma_bonus },
+                          ].map(
+                            (stat) =>
+                              (stat.base !== null || stat.bonus !== null) && (
+                                <div key={stat.name}>
+                                  <div className="text-neutral-400">{stat.name}</div>
+                                  <div className="text-white">
+                                    {stat.base !== null && stat.bonus !== null
+                                      ? `${stat.base}${stat.bonus >= 0 ? '+' : ''}${stat.bonus}`
+                                      : stat.base !== null
+                                        ? `${stat.base}`
+                                        : stat.bonus !== null
+                                          ? `${stat.bonus >= 0 ? '+' : ''}${stat.bonus}`
+                                          : '—'}
+                                  </div>
+                                </div>
+                              )
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {(() => {
+                    const hasAnyExtraOptions = draft.style.trim() || draft.clothing.trim() || draft.expression.trim();
+
+                    if (!hasAnyExtraOptions) return null;
+
+                    return (
+                      <div className="mt-4 border-t border-neutral-800 pt-4">
+                        <div className="text-neutral-400 text-sm font-semibold mb-3">Extra Options</div>
+                        <div className="space-y-2 text-sm">
+                          {draft.style.trim() && (
+                            <div>
+                              <div className="text-neutral-400">Style</div>
+                              <div className="text-white">{draft.style}</div>
+                            </div>
+                          )}
+                          {draft.clothing.trim() && (
+                            <div>
+                              <div className="text-neutral-400">Clothing</div>
+                              <div className="text-white">{draft.clothing}</div>
+                            </div>
+                          )}
+                          {draft.expression.trim() && (
+                            <div>
+                              <div className="text-neutral-400">Expression</div>
+                              <div className="text-white">{draft.expression}</div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             )}

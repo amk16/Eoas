@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import logging
+import re
 from typing import Dict, Any, List
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
@@ -13,6 +14,26 @@ load_dotenv()
 
 # Set up logger
 logger = logging.getLogger(__name__)
+
+
+def _clean_json_response(json_text: str) -> str:
+    """
+    Remove trailing commas from JSON string to make it valid JSON.
+    
+    Gemini API sometimes returns JSON with trailing commas (e.g., {"key": "value",}),
+    which Python's json.loads() cannot parse. This function removes such trailing commas.
+    
+    Args:
+        json_text: JSON string that may contain trailing commas
+        
+    Returns:
+        Cleaned JSON string without trailing commas
+    """
+    # Remove trailing commas before closing braces: ,} -> }
+    json_text = re.sub(r',(\s*})', r'\1', json_text)
+    # Remove trailing commas before closing brackets: ,] -> ]
+    json_text = re.sub(r',(\s*])', r'\1', json_text)
+    return json_text
 
 
 async def analyze_transcript(
@@ -133,17 +154,19 @@ Event schemas:
 Transcript:
 {transcript}
 
-Return a JSON array of events. Each event must include:
-- "type": The event type name in lowercase (one of: {', '.join(registered_events.keys())}) - MUST be lowercase, e.g., "turn_advance", "spell_cast", "initiative_roll"
-- "character_id": <integer ID from the character list>
-- "character_name": "<exact name from character list>"
-- All other required fields for that event type
-- "transcript_segment": "<the exact text segment that describes this event>"
+Return a JSON array of events. Each event MUST include:
+- "type": The event type name in lowercase (one of: {', '.join(registered_events.keys())}) - REQUIRED field, MUST be lowercase, e.g., "damage", "healing", "turn_advance", "spell_cast", "initiative_roll"
+- "character_id": <integer ID from the character list> - REQUIRED field
+- "character_name": "<exact name from character list>" - REQUIRED field
+- All other required fields for that event type (see schemas above)
+- "transcript_segment": "<the exact text segment that describes this event>" - REQUIRED field
+
+CRITICAL: Every event object MUST have a "type" field. Do not include events without a "type" field.
 
 Only include events where you can clearly identify:
 - A character name that matches one from the list
-- A valid event type from the registered types
-- All required fields for that event type
+- A valid event type from the registered types: {', '.join(registered_events.keys())}
+- All required fields for that event type (including "type", "character_id", "character_name")
 
 If no events are found, return an empty array: []
 
@@ -179,6 +202,12 @@ Return ONLY valid JSON, no additional text or explanation."""
             lines = response_text.split('\n')
             response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
         
+        # Clean JSON response (remove trailing commas that Gemini sometimes includes)
+        original_length = len(response_text)
+        response_text = _clean_json_response(response_text)
+        if len(response_text) != original_length:
+            logger.debug("Cleaned trailing commas from JSON response")
+        
         # Parse JSON response
         logger.info("Parsing JSON response from Gemini")
         events = json.loads(response_text)
@@ -195,6 +224,8 @@ Return ONLY valid JSON, no additional text or explanation."""
             event_type_name = event.get('type')
             if not event_type_name:
                 logger.warning(f"Event {i+1}: Missing 'type' field, skipping")
+                logger.debug(f"Event {i+1} fields: {list(event.keys())}")
+                logger.debug(f"Event {i+1} content: {event}")
                 continue
             
             # Get the event type handler
