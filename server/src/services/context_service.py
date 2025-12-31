@@ -121,9 +121,7 @@ async def get_user_context(user_id: str) -> Dict[str, Any]:
         return context
         
     except Exception as e:
-        logger.error(f"Error gathering user context: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.exception(f"Error gathering user context: {e}")
         # Return empty context on error rather than failing
         return {
             "campaigns": [],
@@ -149,4 +147,5 @@ async def get_session_context(session_id: str, user_id: str) -> Optional[Dict[st
     logger.warning(f"get_session_context called but deprecated (session_id={session_id})")
     # This function is no longer used - session data is queried directly from Firestore in routes
     return None
+
 

@@ -3,7 +3,10 @@ import time
 from collections import defaultdict
 from fastapi import APIRouter, Request, HTTPException
 import httpx
+import logging
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -98,7 +101,7 @@ async def get_scribe_token(request: Request):
             if response.status_code >= 400:
                 # Log error details without exposing API key
                 error_text = response.text
-                print(f"ElevenLabs API error (status {response.status_code}): {error_text}")
+                logger.error(f"ElevenLabs API error (status {response.status_code}): {error_text}")
                 
                 # Return appropriate error to client
                 if response.status_code == 401:
@@ -128,7 +131,7 @@ async def get_scribe_token(request: Request):
         )
     except httpx.RequestError as e:
         # Network or connection errors
-        print(f"Network error calling ElevenLabs API: {e}")
+        logger.error(f"Network error calling ElevenLabs API: {e}")
         raise HTTPException(
             status_code=502,
             detail="Failed to connect to ElevenLabs API. Please try again later."
@@ -138,7 +141,7 @@ async def get_scribe_token(request: Request):
         raise
     except Exception as e:
         # Unexpected errors
-        print(f"Unexpected error in scribe token endpoint: {e}")
+        logger.error(f"Unexpected error in scribe token endpoint: {e}")
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while generating the token."

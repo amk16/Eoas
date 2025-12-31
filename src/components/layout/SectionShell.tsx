@@ -27,10 +27,10 @@ export default function SectionShell({
 
   const navItems: NavItem[] = useMemo(
     () => [
-      { to: '/campaigns', label: 'Campaigns', description: 'Worlds' },
-      { to: '/characters', label: 'Characters', description: 'Heroes' },
-      { to: '/sessions', label: 'Sessions', description: 'Adventures' },
-      { to: '/ioun-silence', label: 'Ioun', description: 'Fast Detection' },
+      { to: '/campaigns', label: 'Campaigns', description: 'create a campaign' },
+      { to: '/characters', label: 'Characters', description: 'create characters' },
+      { to: '/sessions', label: 'Sessions', description: 'start a session' },
+      { to: '/ioun-silence', label: 'Ioun', description: 'Discuss D&D' },
     ],
     []
   );
@@ -66,10 +66,10 @@ export default function SectionShell({
           className="w-full text-left"
         >
           <div className="text-sm tracking-wide" style={{ color: theme.colors.foreground.muted }}>
-            D&D Damage Tracker
+            Dungeon Console
           </div>
-          <div className="text-base font-semibold" style={{ color: theme.colors.foreground.primary }}>
-            Dashboard
+          <div className="text-2xl font-semibold" style={{ color: theme.colors.foreground.primary }}>
+            PickAxe
           </div>
         </button>
       </div>

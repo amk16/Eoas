@@ -40,7 +40,7 @@ export default function Home() {
       title: 'Live Scribe',
       description: 'Real-time transcription and automatic damage tracking from your voice',
       label: 'Voice AI',
-      onClick: () => navigate('/scribe')
+      onClick: () => navigate('/ioun-silence')
     },
     {
       color: theme.colors.background.tertiary,

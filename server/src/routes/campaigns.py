@@ -4,7 +4,6 @@ from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
 from ..middleware.auth import authenticate_token
-from ..db.database import get_database
 from ..db.firebase import get_firestore
 from firebase_admin import firestore
 from ..services.nano_banana_service import generate_campaign_image
@@ -64,7 +63,7 @@ async def get_campaigns(request: Request, user_id: str = Depends(authenticate_to
         logger.info(f'[Campaigns API] GET /campaigns - Sending response with {len(campaigns)} campaign(s), protocol={scheme}, forwarded_proto={forwarded_proto}')
         return campaigns
     except Exception as e:
-        print(f'Error fetching campaigns: {e}')
+        logger.error(f'Error fetching campaigns: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -142,7 +141,7 @@ async def get_campaign(campaign_id: str, request: Request, user_id: str = Depend
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error fetching campaign: {e}')
+        logger.error(f'Error fetching campaign: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -204,7 +203,7 @@ async def create_campaign(campaign: CampaignCreate, request: Request, user_id: s
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error creating campaign: {e}')
+        logger.error(f'Error creating campaign: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -268,7 +267,7 @@ async def update_campaign(
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error updating campaign: {e}')
+        logger.error(f'Error updating campaign: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -305,7 +304,7 @@ async def delete_campaign(campaign_id: str, request: Request, user_id: str = Dep
     except HTTPException:
         raise
     except Exception as e:
-        print(f'Error deleting campaign: {e}')
+        logger.error(f'Error deleting campaign: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 
 
@@ -406,7 +405,6 @@ async def generate_campaign_art(
             return result
         except Exception as e:
             logger.error(f'[CAMPAIGNS] Error generating campaign banner art: {e}')
-            print(f'Error generating campaign art: {e}')
             raise HTTPException(
                 status_code=500,
                 detail=f'Failed to generate campaign banner art: {str(e)}'
@@ -415,6 +413,5 @@ async def generate_campaign_art(
         raise
     except Exception as e:
         logger.error(f'[CAMPAIGNS] Error in generate_campaign_art endpoint: {e}')
-        print(f'Error in generate_campaign_art endpoint: {e}')
         raise HTTPException(status_code=500, detail='Internal server error')
 

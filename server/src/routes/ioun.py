@@ -467,9 +467,7 @@ async def chat_with_ioun(
         logger.error(f"Configuration error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
-        logger.error(f"Error in chat request: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.exception(f"Error in chat request: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Failed to process chat request: {str(e)}"
@@ -601,9 +599,7 @@ async def execute_creations(
         except Exception as e:
             # Unexpected errors
             error_msg = f"Unexpected error: {str(e)}"
-            logger.error(f"Creation request {i+1} unexpected error: {error_msg}")
-            import traceback
-            logger.error(traceback.format_exc())
+            logger.exception(f"Creation request {i+1} unexpected error: {error_msg}")
             error_count += 1
             created_items.append(CreatedItem(
                 action_type=action_type,
